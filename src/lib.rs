@@ -87,12 +87,15 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 /// This macro:
 /// 1. Generates a struct named `<OriginalName>Create` that includes only the fields
 ///    where `#[crudcrate(create_model = false)]` is NOT specified (default is true).
+///    If a field has an `on_create` expression, its type is made optional (with `#[serde(default)]`)
+///    so that the user may override the default.
 /// 2. Generates an impl of `From<<OriginalName>Create> for <ActiveModelType>` where:
-///    - For each field that is exposed (create_model = true), the value is taken from the
-///      create struct.
+///    - For each field that is exposed (create_model = true) with an on_create expression,
+///      the value is taken from the create struct if provided; otherwise, the on_create
+///      expression is used (with `.into()` called if necessary).
+///    - For fields that are exposed without an on_create expression, the value is taken directly.
 ///    - For fields that are not exposed but have an `on_create` expression, that expression
-///      is used (with `.into()` called if necessary).
-///    - Otherwise, the field is set to `ActiveValue::NotSet`.
+///      is always used.
 #[proc_macro_derive(ToCreateModel, attributes(crudcrate))]
 pub fn to_create_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -127,15 +130,24 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
         panic!("ToCreateModel can only be derived for structs");
     };
 
-    // Build the Create struct with only fields where create_model is true.
+    // Build the Create struct.
+    // For each field where create_model is true, if an on_create expression is provided,
+    // make its type optional and add a #[serde(default)] so missing JSON will default to None.
     let create_struct_fields = fields
         .iter()
         .filter(|field| get_crudcrate_bool(field, "create_model").unwrap_or(true))
         .map(|field| {
             let ident = &field.ident;
             let ty = &field.ty;
-            quote! {
-                pub #ident: #ty
+            if get_crudcrate_expr(field, "on_create").is_some() {
+                quote! {
+                    #[serde(default)]
+                    pub #ident: Option<#ty>
+                }
+            } else {
+                quote! {
+                    pub #ident: #ty
+                }
             }
         });
 
@@ -146,13 +158,24 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
         let include = get_crudcrate_bool(field, "create_model").unwrap_or(true);
         let is_optional = field_is_optional(field);
         if include {
-            // Pass the value directly.
-            conv_lines.push(quote! {
-                #ident: ActiveValue::Set(create.#ident)
-            });
+            if let Some(expr) = get_crudcrate_expr(field, "on_create") {
+                // Field is included and has a default on_create expression.
+                // The create struct field is an Option, so if the user provides Some(val),
+                // use that; otherwise, use the on_create expression.
+                conv_lines.push(quote! {
+                    #ident: ActiveValue::Set(match create.#ident {
+                        Some(val) => val,
+                        None => (#expr).into(),
+                    })
+                });
+            } else {
+                // Field is included and has no on_create.
+                conv_lines.push(quote! {
+                    #ident: ActiveValue::Set(create.#ident)
+                });
+            }
         } else if let Some(expr) = get_crudcrate_expr(field, "on_create") {
-            // For on_create, if the field is optional, we assume the expression returns the inner type,
-            // so we wrap it in Some.
+            // Field is not exposed in the create struct but has an on_create default.
             if is_optional {
                 conv_lines.push(quote! {
                     #ident: ActiveValue::Set(Some((#expr).into()))
