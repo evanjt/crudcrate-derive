@@ -1,4 +1,12 @@
+### Note
+These are the procedural macros for the `crudcrate` crate. They are not meant to be used directly
+and can be accessed through the `crudcrate` crate.
+
+[GitHub](https://github.com/evanjt/crudcrate) | [crates.io](https://crates.io/crates/crudcrate)
+
+
 # crudcrate-derive
+[crates.io](https://crates.io/crates/crudcrate-derive)
 
 This crate aims to reduce the amount of excess code required to generate structures
 for CRUD APIs working with sea-orm and axum.
