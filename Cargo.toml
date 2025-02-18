@@ -1,11 +1,11 @@
 [package]
-name = "crudcrate"
-version = "0.0.2"
+name = "crudcrate-derive"
+version = "0.0.3"
 edition = "2021"
 description = "Procedural macros to help with CRUD API design using Axum and Sea-ORM in Rust"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/evanjt/crudcrate"
+repository = "https://github.com/evanjt/crudcrate-derive"
 keywords = ["crud", "api", "axum", "sea-orm"]
 categories = ["web-programming", "database"]
 
