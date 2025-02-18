@@ -189,7 +189,7 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
-        #[derive(Serialize, Deserialize, ToSchema, Copy, Clone)]
+        #[derive(Clone, Serialize, Deserialize, ToSchema)]
         pub struct #create_name {
             #(#create_struct_fields),*
         }
@@ -350,7 +350,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         .collect();
 
     let expanded = quote! {
-        #[derive(Serialize, Deserialize, ToSchema, Copy, Clone)]
+        #[derive(Clone, Serialize, Deserialize, ToSchema)]
         pub struct #update_name {
             #(#update_struct_fields),*
         }
