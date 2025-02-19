@@ -139,7 +139,18 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
         .map(|field| {
             let ident = &field.ident;
             let ty = &field.ty;
-            if get_crudcrate_expr(field, "on_create").is_some() {
+            if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
+                if get_crudcrate_expr(field, "default").is_some() {
+                    quote! {
+                        #[serde(default)]
+                        pub #ident: #ty
+                    }
+                } else {
+                    quote! {
+                        pub #ident: #ty
+                    }
+                }
+            } else if get_crudcrate_expr(field, "on_create").is_some() {
                 quote! {
                     #[serde(default)]
                     pub #ident: Option<#ty>
@@ -154,14 +165,14 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
     // Generate conversion lines.
     let mut conv_lines = Vec::new();
     for field in fields.iter() {
+        if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
+            continue;
+        }
         let ident = field.ident.as_ref().unwrap();
         let include = get_crudcrate_bool(field, "create_model").unwrap_or(true);
         let is_optional = field_is_optional(field);
         if include {
             if let Some(expr) = get_crudcrate_expr(field, "on_create") {
-                // Field is included and has a default on_create expression.
-                // The create struct field is an Option, so if the user provides Some(val),
-                // use that; otherwise, use the on_create expression.
                 conv_lines.push(quote! {
                     #ident: ActiveValue::Set(match create.#ident {
                         Some(val) => val,
@@ -169,13 +180,11 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
                     })
                 });
             } else {
-                // Field is included and has no on_create.
                 conv_lines.push(quote! {
                     #ident: ActiveValue::Set(create.#ident)
                 });
             }
         } else if let Some(expr) = get_crudcrate_expr(field, "on_create") {
-            // Field is not exposed in the create struct but has an on_create default.
             if is_optional {
                 conv_lines.push(quote! {
                     #ident: ActiveValue::Set(Some((#expr).into()))
@@ -263,14 +272,29 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
     let update_struct_fields = included_fields.iter().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
-        // For update, if the field is Option<T>, we want the update struct field to be Option<Option<T>>.
-        let (_is_option, inner_ty) = if let syn::Type::Path(type_path) = ty {
-            if let Some(seg) = type_path.path.segments.first() {
-                if seg.ident == "Option" {
-                    if let syn::PathArguments::AngleBracketed(inner_args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = inner_args.args.first()
-                        {
-                            (true, inner_ty.clone())
+        if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
+            if get_crudcrate_expr(field, "default").is_some() {
+                quote! {
+                    #[serde(default)]
+                    pub #ident: #ty
+                }
+            } else {
+                quote! {
+                    pub #ident: #ty
+                }
+            }
+        } else {
+            let (_is_option, inner_ty) = if let syn::Type::Path(type_path) = ty {
+                if let Some(seg) = type_path.path.segments.first() {
+                    if seg.ident == "Option" {
+                        if let syn::PathArguments::AngleBracketed(inner_args) = &seg.arguments {
+                            if let Some(syn::GenericArgument::Type(inner_ty)) =
+                                inner_args.args.first()
+                            {
+                                (true, inner_ty.clone())
+                            } else {
+                                (false, ty.clone())
+                            }
                         } else {
                             (false, ty.clone())
                         }
@@ -282,28 +306,26 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
                 }
             } else {
                 (false, ty.clone())
+            };
+            quote! {
+                #[serde(
+                    default,
+                    skip_serializing_if = "Option::is_none",
+                    with = "::serde_with::rust::double_option"
+                )]
+                pub #ident: Option<Option<#inner_ty>>
             }
-        } else {
-            (false, ty.clone())
-        };
-        quote! {
-            #[serde(
-                default,
-                skip_serializing_if = "Option::is_none",
-                with = "::serde_with::rust::double_option"
-            )]
-            pub #ident: Option<Option<#inner_ty>>
         }
     });
 
     // Generate merge code for fields included in the update struct.
     let included_merge: Vec<_> = included_fields
         .iter()
+        .filter(|field| !get_crudcrate_bool(field, "non_db_attr").unwrap_or(false))
         .map(|field| {
             let ident = &field.ident;
             let is_optional = field_is_optional(field);
             if is_optional {
-                // For optional fields, wrap the inner value in Some.
                 quote! {
                     model.#ident = match self.#ident {
                         Some(Some(value)) => ActiveValue::Set(Some(value)),
@@ -327,21 +349,21 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
     // generate merge code. Wrap the expression using `.into()` if needed.
     let excluded_merge: Vec<_> = fields
         .iter()
+        .filter(|field| {
+            get_crudcrate_bool(field, "update_model") == Some(false)
+                && !get_crudcrate_bool(field, "non_db_attr").unwrap_or(false)
+        })
         .filter_map(|field| {
-            if get_crudcrate_bool(field, "update_model") == Some(false) {
-                if let Some(expr) = get_crudcrate_expr(field, "on_update") {
-                    let ident = &field.ident;
-                    if field_is_optional(field) {
-                        Some(quote! {
-                            model.#ident = ActiveValue::Set(Some((#expr).into()));
-                        })
-                    } else {
-                        Some(quote! {
-                            model.#ident = ActiveValue::Set((#expr).into());
-                        })
-                    }
+            if let Some(expr) = get_crudcrate_expr(field, "on_update") {
+                let ident = &field.ident;
+                if field_is_optional(field) {
+                    Some(quote! {
+                        model.#ident = ActiveValue::Set(Some((#expr).into()));
+                    })
                 } else {
-                    None
+                    Some(quote! {
+                        model.#ident = ActiveValue::Set((#expr).into());
+                    })
                 }
             } else {
                 None
