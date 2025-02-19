@@ -104,3 +104,16 @@ Using the `ToUpdateModel` and `ToCreateModel` create the models
 `ProjectUpdate` and `ProjectCreate` respectively. Using the `update` and
 `create` attributes allow the flexibility of their inclusion in the
 generated structs.
+
+## Including Auxiliary (Non-DB) Fields
+
+In some cases, you might want to include fields in your API models that do not directly map to columns in your database. For example, you might want to pass along auxiliary data that is handled separately in your business logic. You can achieve this by using the `non_db_attr` attribute. Fields marked with `#[crudcrate(non_db_attr = true, default = ...)]` will be included in the generated Create and Update models but will be omitted from the conversion into the database's ActiveModel.
+
+For example, if you want to include a field to hold sensor data that is processed separately, you can annotate it as follows:
+
+```rust
+#[crudcrate(non_db_attr = true, default = vec![])]
+pub data: Vec<crate::sensors::data::models::SensorData>,
+```
+
+This field will appear in both the generated Create and Update models (e.g. ProjectCreate/ProjectUpdate or your corresponding model's structs), allowing you to handle it in your custom update or create logic without affecting the database operations.
