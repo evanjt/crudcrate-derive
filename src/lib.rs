@@ -311,7 +311,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
                 #[serde(
                     default,
                     skip_serializing_if = "Option::is_none",
-                    with = "::serde_with::rust::double_option"
+                    with = "crudcrate::serde_with::rust::double_option"
                 )]
                 pub #ident: Option<Option<#inner_ty>>
             }

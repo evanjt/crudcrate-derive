@@ -1,6 +1,6 @@
 [package]
 name = "crudcrate-derive"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Procedural macros to help with CRUD API design using Axum and Sea-ORM in Rust"
 license = "MIT"
@@ -10,9 +10,9 @@ keywords = ["crud", "api", "axum", "sea-orm"]
 categories = ["web-programming", "database"]
 
 [dependencies]
-quote = "1.0.38"
-syn = "2.0.98"
-proc-macro2 = "1"
+quote = "1.0.39"
+syn = "2.0.100"
+proc-macro2 = "1.0.94"
 
 [lib]
 proc-macro = true
