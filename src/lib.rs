@@ -346,7 +346,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         .collect();
 
     // For fields excluded (update_model = false) that have an on_update expression,
-    // generate merge code. Wrap the expression using `.into()` if needed.
+    // generate merge code.
     let excluded_merge: Vec<_> = fields
         .iter()
         .filter(|field| {
@@ -377,11 +377,19 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
             #(#update_struct_fields),*
         }
 
+        // Generate an inherent method with a distinct name.
         impl #update_name {
-            pub fn merge_into_activemodel(self, mut model: #active_model_type) -> #active_model_type {
+            pub fn merge_fields(self, mut model: #active_model_type) -> #active_model_type {
                 #(#included_merge)*
                 #(#excluded_merge)*
                 model
+            }
+        }
+
+        // Implement the trait by delegating to the inherent method.
+        impl crudcrate::traits::MergeIntoActiveModel<#active_model_type> for #update_name {
+            fn merge_into_activemodel(self, model: #active_model_type) -> #active_model_type {
+                Self::merge_fields(self, model)
             }
         }
     };
