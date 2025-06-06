@@ -5,21 +5,21 @@ use syn::{
     parse_macro_input, punctuated::Punctuated, token::Comma, Data, DeriveInput, Fields, Lit, Meta,
 };
 
-/// Returns true if the field’s type is of the form Option<…>
+/// Returns true if the field’s type is `Option<…>` (including `std::option::Option<…>`).
 fn field_is_optional(field: &syn::Field) -> bool {
     if let syn::Type::Path(type_path) = &field.ty {
-        type_path
-            .path
-            .segments
-            .first()
-            .map(|seg| seg.ident == "Option")
-            .unwrap_or(false)
+        // Look at the *last* segment in the path to see if its identifier is "Option"
+        if let Some(last_seg) = type_path.path.segments.last() {
+            last_seg.ident == "Option"
+        } else {
+            false
+        }
     } else {
         false
     }
 }
 
-/// Given a field and a key (e.g. "create_model" or "update_model"),
+/// Given a field and a key (e.g. `"create_model"` or `"update_model"`),
 /// look for a `#[crudcrate(...)]` attribute on the field and return the boolean value
 /// associated with that key, if present.
 fn get_crudcrate_bool(field: &syn::Field, key: &str) -> Option<bool> {
@@ -46,7 +46,7 @@ fn get_crudcrate_bool(field: &syn::Field, key: &str) -> Option<bool> {
     None
 }
 
-/// Given a field and a key (e.g. "on_create" or "on_update"), returns the expression
+/// Given a field and a key (e.g. `"on_create"` or `"on_update"`), returns the expression
 /// provided in the `#[crudcrate(...)]` attribute for that key.
 fn get_crudcrate_expr(field: &syn::Field, key: &str) -> Option<syn::Expr> {
     for attr in &field.attrs {
@@ -68,8 +68,8 @@ fn get_crudcrate_expr(field: &syn::Field, key: &str) -> Option<syn::Expr> {
     None
 }
 
-/// Extracts a string literal from a struct-level attribute of the form:
-///   #[active_model = "some::path"]
+/// Extracts a string literal from a struct‐level attribute of the form:
+///   `#[active_model = "some::path"]`
 fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
     if let Meta::NameValue(nv) = &attr.meta {
         if let syn::Expr::Lit(expr_lit) = &nv.value {
@@ -86,23 +86,40 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 /// ===================
 /// This macro:
 /// 1. Generates a struct named `<OriginalName>Create` that includes only the fields
-///    where `#[crudcrate(create_model = false)]` is NOT specified (default is true).
-///    If a field has an `on_create` expression, its type is made optional (with `#[serde(default)]`)
-///    so that the user may override the default.
-/// 2. Generates an impl of `From<<OriginalName>Create> for <ActiveModelType>` where:
-///    - For each field that is exposed (create_model = true) with an on_create expression,
-///      the value is taken from the create struct if provided; otherwise, the on_create
-///      expression is used (with `.into()` called if necessary).
-///    - For fields that are exposed without an on_create expression, the value is taken directly.
-///    - For fields that are not exposed but have an `on_create` expression, that expression
-///      is always used.
+///    where `#[crudcrate(create_model = false)]` is NOT specified (default = true).
+///    If a field has an `on_create` expression, its type becomes `Option<…>`
+///    (with `#[serde(default)]`) so the user can override that default.
+/// 2. Generates an `impl From<<OriginalName>Create> for <ActiveModelType>>` where:
+///    – For each field with `on_create`:
+///       • If the original type was `Option<T>`, then `create.<field>` is `Option<Option<T>>`.
+///         We match on that and do:
+///           ```rust
+///           match create.field {
+///             Some(Some(v)) => Some(v.into()),      // user overrode with T
+///             Some(None)    => None,                // user explicitly set null
+///             None          => Some((expr).into()), // fallback to expr
+///           }
+///           ```
+///       • If the original type was non‐optional `T`, then `create.<field>` is `Option<T>`.
+///         We match on that and do:
+///           ```rust
+///           match create.field {
+///             Some(v) => v.into(),
+///             None    => (expr).into(),
+///           }
+///           ```
+///    – For each field without `on_create`:
+///       • If the original type was `Option<T>`, we do `create.<field>.map(|v| v.into())`.
+///       • If it was non‐optional `T`, we do `create.<field>.into()`.
+///    – For any field excluded (`create_model = false`) but having `on_create`, we do
+///       `Some((expr).into())` if it was `Option<T>`, or just `(expr).into()` otherwise.
 #[proc_macro_derive(ToCreateModel, attributes(crudcrate))]
 pub fn to_create_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     let create_name = format_ident!("{}Create", name);
 
-    // Look for a struct-level active_model override.
+    // Look for a struct‐level #[active_model = "…"] override
     let mut active_model_override = None;
     for attr in &input.attrs {
         if attr.path().is_ident("active_model") {
@@ -119,7 +136,7 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
         quote! { #ident }
     };
 
-    // Support only structs with named fields.
+    // Only support structs with named fields
     let fields = if let Data::Struct(data) = input.data {
         if let Fields::Named(named) = data.fields {
             named.named
@@ -130,15 +147,15 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
         panic!("ToCreateModel can only be derived for structs");
     };
 
-    // Build the Create struct.
-    // For each field where create_model is true, if an on_create expression is provided,
-    // make its type optional and add a #[serde(default)] so missing JSON will default to None.
+    // Build the `<Name>Create` struct: include only fields where create_model != false
     let create_struct_fields = fields
         .iter()
         .filter(|field| get_crudcrate_bool(field, "create_model").unwrap_or(true))
         .map(|field| {
             let ident = &field.ident;
             let ty = &field.ty;
+
+            // If #[crudcrate(non_db_attr)] and has a `default`, keep the original type
             if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
                 if get_crudcrate_expr(field, "default").is_some() {
                     quote! {
@@ -150,41 +167,70 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
                         pub #ident: #ty
                     }
                 }
-            } else if get_crudcrate_expr(field, "on_create").is_some() {
+            }
+            // If there is an `#[crudcrate(on_create = …)]`, wrap in `Option<…>` so caller can override
+            else if get_crudcrate_expr(field, "on_create").is_some() {
                 quote! {
                     #[serde(default)]
                     pub #ident: Option<#ty>
                 }
-            } else {
+            }
+            // Otherwise, just use the original type
+            else {
                 quote! {
                     pub #ident: #ty
                 }
             }
         });
 
-    // Generate conversion lines.
+    // Now build the `impl From<Create> for ActiveModelType`
     let mut conv_lines = Vec::new();
     for field in fields.iter() {
+        // Skip #[crudcrate(non_db_attr)] entirely
         if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
             continue;
         }
         let ident = field.ident.as_ref().unwrap();
         let include = get_crudcrate_bool(field, "create_model").unwrap_or(true);
         let is_optional = field_is_optional(field);
+
         if include {
             if let Some(expr) = get_crudcrate_expr(field, "on_create") {
+                // CASE A: field has #[crudcrate(on_create = ...)]
+                if is_optional {
+                    // Original was Option<T> → create.<ident> is Option<Option<T>>
+                    conv_lines.push(quote! {
+                        #ident: ActiveValue::Set(match create.#ident {
+                            Some(Some(inner)) => Some(inner.into()),       // user override
+                            Some(None)         => None,                    // user explicitly set null
+                            None               => Some((#expr).into()),    // fallback to expr
+                        })
+                    });
+                } else {
+                    // Original was T → create.<ident> is Option<T>
+                    conv_lines.push(quote! {
+                        #ident: ActiveValue::Set(match create.#ident {
+                            Some(val) => val.into(),
+                            None      => (#expr).into(),
+                        })
+                    });
+                }
+            }
+            // CASE B: no on_create
+            else if is_optional {
+                // Original was Option<T> → do `map(|v| v.into())`
                 conv_lines.push(quote! {
-                    #ident: ActiveValue::Set(match create.#ident {
-                        Some(val) => val,
-                        None => (#expr).into(),
-                    })
+                    #ident: ActiveValue::Set(create.#ident.map(|v| v.into()))
                 });
             } else {
+                // Original was T → do `.into()` directly
                 conv_lines.push(quote! {
-                    #ident: ActiveValue::Set(create.#ident)
+                    #ident: ActiveValue::Set(create.#ident.into())
                 });
             }
-        } else if let Some(expr) = get_crudcrate_expr(field, "on_create") {
+        }
+        // CASE C: excluded from create but has #[crudcrate(on_create = ...)]
+        else if let Some(expr) = get_crudcrate_expr(field, "on_create") {
             if is_optional {
                 conv_lines.push(quote! {
                     #ident: ActiveValue::Set(Some((#expr).into()))
@@ -220,22 +266,33 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
 /// ===================
 /// This macro:
 /// 1. Generates a struct named `<OriginalName>Update` that includes only the fields
-///    where `#[crudcrate(update_model = false)]` is NOT specified (default is true).
+///    where `#[crudcrate(update_model = false)]` is NOT specified (default = true).
 /// 2. Generates an impl for a method
 ///    `merge_into_activemodel(self, mut model: ActiveModelType) -> ActiveModelType`
 ///    that, for each field:
-///    - For fields included in the update struct, if a value is provided, it is merged into the model.
-///      If the field is optional, the value (of type T) must be wrapped in Some to match the ActiveModel’s field of type Option<T>.
-///    - For fields excluded (update_model = false) but with an `on_update` expression, that expression is used
-///      (wrapped with Some(...) if the field is optional).
-///    - Other fields are left unchanged.
+///    – If it’s included in the update struct, and the user provided a value:
+///       • If the original field type was `Option<T>`, we match on
+///         `Option<Option<T>>`:
+///           ```rust
+///           Some(Some(v)) => ActiveValue::Set(Some(v.into())),
+///           Some(None)    => ActiveValue::Set(None),     // explicit set to None
+///           None          => ActiveValue::NotSet,       // no change
+///           ```  
+///       • If the original field type was non‐optional `T`, we match on `Option<T>`:
+///           ```rust
+///           Some(val) => ActiveValue::Set(val.into()),
+///           _         => ActiveValue::NotSet,
+///           ```  
+///    – If it’s excluded (`update_model = false`) but has `on_update = expr`, we do
+///      `ActiveValue::Set(expr.into())` (wrapped in `Some(...)` if the original field was `Option<T>`).
+///    – All other fields remain unchanged.
 #[proc_macro_derive(ToUpdateModel, attributes(crudcrate, active_model))]
 pub fn to_update_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     let update_name = format_ident!("{}Update", name);
 
-    // Look for a struct-level active_model override.
+    // Look for a struct‐level #[active_model = "…"] override
     let mut active_model_override = None;
     for attr in &input.attrs {
         if attr.path().is_ident("active_model") {
@@ -252,7 +309,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         quote! { #ident }
     };
 
-    // Support only structs with named fields.
+    // Only support structs with named fields
     let fields = if let Data::Struct(data) = input.data {
         if let Fields::Named(named) = data.fields {
             named.named
@@ -263,7 +320,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         panic!("ToUpdateModel can only be derived for structs");
     };
 
-    // Build the Update struct with only fields where update_model is true.
+    // Collect only the fields where `update_model != false`
     let included_fields: Vec<_> = fields
         .iter()
         .filter(|field| get_crudcrate_bool(field, "update_model").unwrap_or(true))
@@ -272,6 +329,8 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
     let update_struct_fields = included_fields.iter().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
+
+        // If #[crudcrate(non_db_attr)] with a default, keep the original type
         if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
             if get_crudcrate_expr(field, "default").is_some() {
                 quote! {
@@ -283,9 +342,12 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
                     pub #ident: #ty
                 }
             }
-        } else {
+        }
+        // Otherwise, wrap in `Option<Option<Inner>>` so we can tell “not provided” vs “explicit None”
+        else {
+            // Pull out the inner T if this is Option<T>, else T itself.
             let (_is_option, inner_ty) = if let syn::Type::Path(type_path) = ty {
-                if let Some(seg) = type_path.path.segments.first() {
+                if let Some(seg) = type_path.path.segments.last() {
                     if seg.ident == "Option" {
                         if let syn::PathArguments::AngleBracketed(inner_args) = &seg.arguments {
                             if let Some(syn::GenericArgument::Type(inner_ty)) =
@@ -318,35 +380,36 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         }
     });
 
-    // Generate merge code for fields included in the update struct.
+    // Generate the merge code for included fields:
     let included_merge: Vec<_> = included_fields
         .iter()
         .filter(|field| !get_crudcrate_bool(field, "non_db_attr").unwrap_or(false))
         .map(|field| {
             let ident = &field.ident;
             let is_optional = field_is_optional(field);
+
             if is_optional {
+                // Original was Option<T> → `self.field` is Option<Option<T>>
                 quote! {
                     model.#ident = match self.#ident {
-                        Some(Some(value)) => ActiveValue::Set(Some(value)),
-                        Some(_) => ActiveValue::NotSet,
-                        _ => ActiveValue::NotSet,
+                        Some(Some(value)) => ActiveValue::Set(Some(value.into())),
+                        Some(None)      => ActiveValue::Set(None),    // explicitly set None
+                        None            => ActiveValue::NotSet,      // no change
                     };
                 }
             } else {
+                // Original was T → `self.field` is Option<T>
                 quote! {
                     model.#ident = match self.#ident {
-                        Some(Some(value)) => ActiveValue::Set(value),
-                        Some(_) => ActiveValue::NotSet,
-                        _ => ActiveValue::NotSet,
+                        Some(Some(value)) => ActiveValue::Set(value.into()),
+                        _                 => ActiveValue::NotSet,
                     };
                 }
             }
         })
         .collect();
 
-    // For fields excluded (update_model = false) that have an on_update expression,
-    // generate merge code.
+    // Generate the merge code for fields excluded from update but having on_update:
     let excluded_merge: Vec<_> = fields
         .iter()
         .filter(|field| {
@@ -357,10 +420,12 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
             if let Some(expr) = get_crudcrate_expr(field, "on_update") {
                 let ident = &field.ident;
                 if field_is_optional(field) {
+                    // Original was Option<T>
                     Some(quote! {
                         model.#ident = ActiveValue::Set(Some((#expr).into()));
                     })
                 } else {
+                    // Original was T
                     Some(quote! {
                         model.#ident = ActiveValue::Set((#expr).into());
                     })
@@ -377,7 +442,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
             #(#update_struct_fields),*
         }
 
-        // Generate an inherent method with a distinct name.
+        // Inherent method that applies the merges:
         impl #update_name {
             pub fn merge_fields(self, mut model: #active_model_type) -> #active_model_type {
                 #(#included_merge)*
@@ -386,7 +451,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement the trait by delegating to the inherent method.
+        // Trait implementation that delegates to merge_fields:
         impl crudcrate::traits::MergeIntoActiveModel<#active_model_type> for #update_name {
             fn merge_into_activemodel(self, model: #active_model_type) -> #active_model_type {
                 Self::merge_fields(self, model)
