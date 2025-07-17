@@ -93,7 +93,7 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 ///    - For each field with `on_create`:
 ///       - If the original type was `Option<T>`, then `create.<field>` is `Option<Option<T>>`.
 ///         We match on that and do:
-///           ```rust
+///           ```rust,ignore
 ///           match create.field {
 ///             Some(Some(v)) => Some(v.into()),      // user overrode with T
 ///             Some(None)    => None,                // user explicitly set null
@@ -102,7 +102,7 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 ///           ```
 ///       - If the original type was non‐optional `T`, then `create.<field>` is `Option<T>`.
 ///         We match on that and do:
-///           ```rust
+///           ```rust,ignore
 ///           match create.field {
 ///             Some(v) => v.into(),
 ///             None    => (expr).into(),
@@ -113,7 +113,7 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 ///       - If it was non‐optional `T`, we do `create.<field>.into()`.
 ///    - For any field excluded (`create_model = false`) but having `on_create`, we do
 ///      `Some((expr).into())` if it was `Option<T>`, or just `(expr).into()` otherwise.
-#[proc_macro_derive(ToCreateModel, attributes(crudcrate))]
+#[proc_macro_derive(ToCreateModel, attributes(crudcrate, active_model))]
 pub fn to_create_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
@@ -273,13 +273,13 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
 ///    - If it’s included in the update struct, and the user provided a value:
 ///       - If the original field type was `Option<T>`, we match on
 ///         `Option<Option<T>>`:
-///           ```rust
+///           ```rust,ignore
 ///           Some(Some(v)) => ActiveValue::Set(Some(v.into())),
 ///           Some(None)    => ActiveValue::Set(None),     // explicit set to None
 ///           None          => ActiveValue::NotSet,       // no change
 ///           ```  
 ///       - If the original field type was non‐optional `T`, we match on `Option<T>`:
-///           ```rust
+///           ```rust,ignore
 ///           Some(val) => ActiveValue::Set(val.into()),
 ///           _         => ActiveValue::NotSet,
 ///           ```  
@@ -460,4 +460,179 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::{parse_quote, Attribute, Field};
+
+    #[test]
+    fn test_field_is_optional_with_option() {
+        let field: Field = parse_quote! {
+            pub field: Option<String>
+        };
+        assert!(field_is_optional(&field));
+    }
+
+    #[test]
+    fn test_field_is_optional_with_std_option() {
+        let field: Field = parse_quote! {
+            pub field: std::option::Option<String>
+        };
+        assert!(field_is_optional(&field));
+    }
+
+    #[test]
+    fn test_field_is_optional_with_non_option() {
+        let field: Field = parse_quote! {
+            pub field: String
+        };
+        assert!(!field_is_optional(&field));
+    }
+
+    #[test]
+    fn test_field_is_optional_with_complex_type() {
+        let field: Field = parse_quote! {
+            pub field: Vec<String>
+        };
+        assert!(!field_is_optional(&field));
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_create_model_false() {
+        let field: Field = parse_quote! {
+            #[crudcrate(create_model = false)]
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), Some(false));
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_create_model_true() {
+        let field: Field = parse_quote! {
+            #[crudcrate(create_model = true)]
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), Some(true));
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_update_model_false() {
+        let field: Field = parse_quote! {
+            #[crudcrate(update_model = false)]
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "update_model"), Some(false));
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_multiple_attributes() {
+        let field: Field = parse_quote! {
+            #[crudcrate(create_model = false, update_model = true)]
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), Some(false));
+        assert_eq!(get_crudcrate_bool(&field, "update_model"), Some(true));
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_no_attribute() {
+        let field: Field = parse_quote! {
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), None);
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_wrong_attribute() {
+        let field: Field = parse_quote! {
+            #[serde(skip)]
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), None);
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_non_db_attr() {
+        let field: Field = parse_quote! {
+            #[crudcrate(non_db_attr = true)]
+            pub field: String
+        };
+        assert_eq!(get_crudcrate_bool(&field, "non_db_attr"), Some(true));
+    }
+
+    #[test]
+    fn test_get_crudcrate_expr_on_create() {
+        let field: Field = parse_quote! {
+            #[crudcrate(on_create = Uuid::new_v4())]
+            pub field: String
+        };
+        let expr = get_crudcrate_expr(&field, "on_create");
+        assert!(expr.is_some());
+        // Test that it contains the expected expression
+        let expr_str = quote::quote!(#expr).to_string();
+        assert!(expr_str.contains("Uuid :: new_v4"));
+    }
+
+    #[test]
+    fn test_get_crudcrate_expr_on_update() {
+        let field: Field = parse_quote! {
+            #[crudcrate(on_update = Utc::now())]
+            pub field: DateTime<Utc>
+        };
+        let expr = get_crudcrate_expr(&field, "on_update");
+        assert!(expr.is_some());
+        let expr_str = quote::quote!(#expr).to_string();
+        assert!(expr_str.contains("Utc :: now"));
+    }
+
+    #[test]
+    fn test_get_crudcrate_expr_default() {
+        let field: Field = parse_quote! {
+            #[crudcrate(default = "default_value".to_string())]
+            pub field: String
+        };
+        let expr = get_crudcrate_expr(&field, "default");
+        assert!(expr.is_some());
+        let expr_str = quote::quote!(#expr).to_string();
+        assert!(expr_str.contains("default_value"));
+    }
+
+    #[test]
+    fn test_get_crudcrate_expr_no_match() {
+        let field: Field = parse_quote! {
+            #[crudcrate(create_model = false)]
+            pub field: String
+        };
+        assert!(get_crudcrate_expr(&field, "on_create").is_none());
+    }
+
+    #[test]
+    fn test_get_string_from_attr_simple() {
+        let attr: Attribute = parse_quote! {
+            #[active_model = "test::ActiveModel"]
+        };
+        let result = get_string_from_attr(&attr);
+        assert_eq!(result, Some("test::ActiveModel".to_string()));
+    }
+
+    #[test]
+    fn test_get_string_from_attr_no_match() {
+        let attr: Attribute = parse_quote! {
+            #[other_attr = "value"]
+        };
+        let result = get_string_from_attr(&attr);
+        // This function extracts any string value regardless of attribute name
+        assert_eq!(result, Some("value".to_string()));
+    }
+
+    #[test]
+    fn test_get_string_from_attr_wrong_type() {
+        let attr: Attribute = parse_quote! {
+            #[active_model = true]
+        };
+        let result = get_string_from_attr(&attr);
+        assert_eq!(result, None);
+    }
 }
