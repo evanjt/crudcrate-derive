@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::parse::Parser;
 use syn::{
     parse_macro_input, punctuated::Punctuated, token::Comma, Data, DeriveInput, Fields, Lit, Meta,
@@ -457,6 +457,223 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
                 Self::merge_fields(self, model)
             }
         }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// =====================
+/// EntityToModels Macro
+/// =====================
+/// This macro generates an API struct from a Sea-ORM entity Model struct, along with
+/// ToCreateModel and ToUpdateModel implementations.
+///
+/// Usage:
+/// ```ignore
+/// #[derive(EntityToModels)]
+/// #[crudcrate(api_struct = "Experiment", active_model = "spice_entity::experiments::ActiveModel")]
+/// pub struct Model {
+///     #[crudcrate(update_model = false, create_model = false, on_create = Uuid::new_v4())]
+///     pub id: Uuid,
+///     pub name: String,
+///     #[crudcrate(non_db_attr = true, default = vec![])]
+///     pub regions: Vec<RegionInput>,
+/// }
+/// ```
+///
+/// This generates:
+/// - An API struct with the specified name (e.g., `Experiment`)
+/// - ToCreateModel and ToUpdateModel implementations
+/// - From<Model> implementation for the API struct
+/// - Support for non-db attributes
+#[proc_macro_derive(EntityToModels, attributes(crudcrate))]
+pub fn entity_to_models(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    
+    // Extract the struct name and fields
+    let struct_name = &input.ident;
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => &fields.named,
+            _ => {
+                return syn::Error::new_spanned(
+                    &input,
+                    "EntityToModels only supports structs with named fields",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(&input, "EntityToModels only supports structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Extract attributes from the struct level
+    let mut api_struct_name = None;
+    let mut active_model_path = None;
+    
+    for attr in &input.attrs {
+        if attr.path().is_ident("crudcrate") {
+            if let Meta::List(meta_list) = &attr.meta {
+                if let Ok(metas) = Punctuated::<Meta, Comma>::parse_terminated
+                    .parse2(meta_list.tokens.clone())
+                {
+                    for meta in metas.iter() {
+                        if let Meta::NameValue(nv) = meta {
+                            if nv.path.is_ident("api_struct") {
+                                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                    if let Lit::Str(s) = &expr_lit.lit {
+                                        api_struct_name = Some(format_ident!("{}", s.value()));
+                                    }
+                                }
+                            } else if nv.path.is_ident("active_model") {
+                                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                    if let Lit::Str(s) = &expr_lit.lit {
+                                        active_model_path = Some(s.value());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let api_struct_name = match api_struct_name {
+        Some(name) => name,
+        None => {
+            return syn::Error::new_spanned(
+                &input,
+                "EntityToModels requires an `api_struct` attribute, e.g., #[crudcrate(api_struct = \"Experiment\")]",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let active_model_path = match active_model_path {
+        Some(path) => path,
+        None => {
+            return syn::Error::new_spanned(
+                &input,
+                "EntityToModels requires an `active_model` attribute, e.g., #[crudcrate(active_model = \"spice_entity::experiments::ActiveModel\")]",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // Parse the active model path
+    let _active_model_type: syn::Type = match syn::parse_str(&active_model_path) {
+        Ok(ty) => ty,
+        Err(_) => {
+            return syn::Error::new_spanned(
+                &input,
+                format!("Invalid active_model path: {}", active_model_path),
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // Separate DB fields from non-DB fields
+    let mut db_fields = Vec::new();
+    let mut non_db_fields = Vec::new();
+    
+    for field in fields.iter() {
+        let is_non_db = get_crudcrate_bool(field, "non_db_attr").unwrap_or(false);
+        if is_non_db {
+            non_db_fields.push(field);
+        } else {
+            db_fields.push(field);
+        }
+    }
+
+    // Generate the API struct fields
+    let mut api_struct_fields = Vec::new();
+    let mut from_model_assignments = Vec::new();
+    
+    // Add DB fields
+    for field in &db_fields {
+        let field_name = &field.ident;
+        let field_type = &field.ty;
+        
+        // Filter out sea_orm attributes for the API struct
+        let api_field_attrs: Vec<_> = field.attrs.iter()
+            .filter(|attr| !attr.path().is_ident("sea_orm"))
+            .collect();
+        
+        api_struct_fields.push(quote! {
+            #(#api_field_attrs)*
+            pub #field_name: #field_type
+        });
+        
+        // Handle DateTime conversion from DateTimeWithTimeZone
+        let assignment = if field_type.to_token_stream().to_string().contains("DateTimeWithTimeZone") {
+            if field_is_optional(field) {
+                quote! {
+                    #field_name: model.#field_name.map(|dt| dt.with_timezone(&chrono::Utc))
+                }
+            } else {
+                quote! {
+                    #field_name: model.#field_name.with_timezone(&chrono::Utc)
+                }
+            }
+        } else {
+            quote! {
+                #field_name: model.#field_name
+            }
+        };
+        
+        from_model_assignments.push(assignment);
+    }
+    
+    // Add non-DB fields with default values
+    for field in &non_db_fields {
+        let field_name = &field.ident;
+        let field_type = &field.ty;
+        
+        // Get default value from attribute
+        let default_expr = get_crudcrate_expr(field, "default")
+            .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+        
+        api_struct_fields.push(quote! {
+            #[crudcrate(non_db_attr = true, default = #default_expr)]
+            pub #field_name: #field_type
+        });
+        
+        from_model_assignments.push(quote! {
+            #field_name: #default_expr
+        });
+    }
+
+    // Generate the API struct
+    let api_struct = quote! {
+        #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel, Clone)]
+        #[active_model = #active_model_path]
+        pub struct #api_struct_name {
+            #(#api_struct_fields),*
+        }
+    };
+
+    // Generate From<Model> implementation
+    let from_impl = quote! {
+        impl From<#struct_name> for #api_struct_name {
+            fn from(model: #struct_name) -> Self {
+                Self {
+                    #(#from_model_assignments),*
+                }
+            }
+        }
+    };
+
+    let expanded = quote! {
+        #api_struct
+        #from_impl
     };
 
     TokenStream::from(expanded)
