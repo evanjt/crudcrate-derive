@@ -8,12 +8,11 @@
 // - OpenAPI schema generation
 // - Field exclusions and auto-generation
 use chrono::{DateTime, Utc};
-use crudcrate::{traits::MergeIntoActiveModel, ToCreateModel, ToUpdateModel};
-use sea_orm::{entity::prelude::*, ActiveValue};
+use crudcrate::{ToCreateModel, ToUpdateModel, traits::MergeIntoActiveModel};
+use sea_orm::{ActiveValue, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-
 // Mock Sea-ORM entity
 mod test_entity {
     use super::*;
@@ -64,7 +63,7 @@ impl From<test_entity::Model> for TestItem {
 // Additional test entities for extended functionality
 mod extended_test_entity {
     use super::*;
-    
+
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
     #[sea_orm(table_name = "extended_test_items")]
     pub struct Model {
@@ -76,10 +75,10 @@ mod extended_test_entity {
         pub updated_at: DateTime<Utc>,
         pub active: bool,
     }
-    
+
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
-    
+
     impl ActiveModelBehavior for ActiveModel {}
 }
 
@@ -112,11 +111,11 @@ pub struct TestItemWithNonDbAttrs {
     pub created_at: DateTime<Utc>,
     #[crudcrate(create_model = false, update_model = false, on_create = Utc::now(), on_update = Utc::now())]
     pub updated_at: DateTime<Utc>,
-    
+
     // Non-database attributes
     #[crudcrate(non_db_attr = true)]
     pub computed_field: String,
-    
+
     #[crudcrate(non_db_attr = true, default = "default_value".to_string())]
     pub default_field: Option<String>,
 }
@@ -305,22 +304,25 @@ mod tests {
             description: Some("Custom description".to_string()),
             active: None, // Should use default
         };
-        
+
         let active_model: extended_test_entity::ActiveModel = create.into();
-        
+
         // Should use defaults
         assert_eq!(active_model.name, Set("default_name".to_string()));
         assert_eq!(active_model.active, Set(true));
-        
+
         // Should use provided value
-        assert_eq!(active_model.description, Set(Some("Custom description".to_string())));
-        
+        assert_eq!(
+            active_model.description,
+            Set(Some("Custom description".to_string()))
+        );
+
         // Auto-generated fields
         assert!(matches!(active_model.id, Set(_)));
         assert!(matches!(active_model.created_at, Set(_)));
         assert!(matches!(active_model.updated_at, Set(_)));
     }
-    
+
     #[test]
     fn test_create_model_override_defaults() {
         let create = TestItemWithDefaultsCreate {
@@ -328,9 +330,9 @@ mod tests {
             description: None,
             active: Some(false),
         };
-        
+
         let active_model: extended_test_entity::ActiveModel = create.into();
-        
+
         // Should use provided values, not defaults
         assert_eq!(active_model.name, Set("Custom Name".to_string()));
         assert_eq!(active_model.description, Set(None));
@@ -346,24 +348,27 @@ mod tests {
             computed_field: "computed_value".to_string(),
             default_field: None, // Should use default
         };
-        
+
         // Non-db attributes should be accessible in Create model
         assert_eq!(create.computed_field, "computed_value");
         assert_eq!(create.default_field, None);
-        
+
         // Convert to ActiveModel - only database fields should be included
         let active_model: test_entity::ActiveModel = create.into();
         assert_eq!(active_model.name, Set("Test Item".to_string()));
-        assert_eq!(active_model.description, Set(Some("A test item".to_string())));
-        
+        assert_eq!(
+            active_model.description,
+            Set(Some("A test item".to_string()))
+        );
+
         // Auto-generated fields should be set
         assert!(matches!(active_model.id, Set(_)));
         assert!(matches!(active_model.created_at, Set(_)));
         assert!(matches!(active_model.updated_at, Set(_)));
-        
+
         // Non-db fields should not be in ActiveModel (this is compile-time enforced)
     }
-    
+
     #[test]
     fn test_non_db_attributes_in_update_model() {
         let update = TestItemWithNonDbAttrsUpdate {
@@ -372,11 +377,11 @@ mod tests {
             computed_field: "updated_computed".to_string(),
             default_field: Some("custom_value".to_string()),
         };
-        
+
         // Non-db attributes should be accessible in Update model
         assert_eq!(update.computed_field, "updated_computed");
         assert_eq!(update.default_field, Some("custom_value".to_string()));
-        
+
         // Test merge into ActiveModel - only database fields should be merged
         let existing = test_entity::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -385,15 +390,15 @@ mod tests {
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
         };
-        
+
         let merged = update.merge_into_activemodel(existing);
-        
+
         // Only database fields should be merged
         assert_eq!(merged.name, Set("Updated Item".to_string()));
         assert!(matches!(merged.description, NotSet)); // Not provided
         assert!(matches!(merged.updated_at, Set(_))); // Auto-updated
     }
-    
+
     #[test]
     fn test_non_db_attributes_serialization() {
         let create = TestItemWithNonDbAttrsCreate {
@@ -402,12 +407,12 @@ mod tests {
             computed_field: "computed".to_string(),
             default_field: Some("custom".to_string()),
         };
-        
+
         let json = serde_json::to_string(&create).unwrap();
         assert!(json.contains("\"name\":\"Serialize Test\""));
         assert!(json.contains("\"computed_field\":\"computed\""));
         assert!(json.contains("\"default_field\":\"custom\""));
-        
+
         let deserialized: TestItemWithNonDbAttrsCreate = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.computed_field, "computed");
         assert_eq!(deserialized.default_field, Some("custom".to_string()));
@@ -420,10 +425,13 @@ mod tests {
             name: Some(Some("Updated Name".to_string())),
             description: Some(Some("Updated description".to_string())),
         };
-        
+
         // Verify the double Option pattern
         assert_eq!(update.name, Some(Some("Updated Name".to_string())));
-        assert_eq!(update.description, Some(Some("Updated description".to_string())));
+        assert_eq!(
+            update.description,
+            Some(Some("Updated description".to_string()))
+        );
     }
 
     #[test]
@@ -432,11 +440,11 @@ mod tests {
             name: Some(Some("JSON Name".to_string())),
             description: Some(None), // Explicitly null
         };
-        
+
         let json = serde_json::to_string(&update).unwrap();
         assert!(json.contains("\"name\":\"JSON Name\""));
         assert!(json.contains("\"description\":null"));
-        
+
         let deserialized: TestItemUpdate = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, Some(Some("JSON Name".to_string())));
         assert_eq!(deserialized.description, Some(None));
@@ -445,9 +453,9 @@ mod tests {
     #[test]
     fn test_update_model_json_deserialization_partial() {
         let json = r#"{"name": "Partial Update"}"#;
-        
+
         let update: TestItemUpdate = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(update.name, Some(Some("Partial Update".to_string())));
         assert_eq!(update.description, None); // Not provided in JSON
     }
@@ -455,28 +463,45 @@ mod tests {
     #[test]
     fn test_comprehensive_openapi_schema() {
         use utoipa::OpenApi;
-        
+
         #[derive(OpenApi)]
         #[openapi(components(schemas(
-            TestItem, TestItemCreate, TestItemUpdate,
-            TestItemWithDefaults, TestItemWithDefaultsCreate,
-            TestItemWithNonDbAttrs, TestItemWithNonDbAttrsCreate, TestItemWithNonDbAttrsUpdate
+            TestItem,
+            TestItemCreate,
+            TestItemUpdate,
+            TestItemWithDefaults,
+            TestItemWithDefaultsCreate,
+            TestItemWithNonDbAttrs,
+            TestItemWithNonDbAttrsCreate,
+            TestItemWithNonDbAttrsUpdate
         )))]
         struct ApiDoc;
-        
+
         let openapi = ApiDoc::openapi();
         let components = openapi.components.unwrap();
-        
+
         // Verify all schemas are present
         assert!(components.schemas.contains_key("TestItem"));
         assert!(components.schemas.contains_key("TestItemCreate"));
         assert!(components.schemas.contains_key("TestItemUpdate"));
         assert!(components.schemas.contains_key("TestItemWithDefaults"));
-        assert!(components.schemas.contains_key("TestItemWithDefaultsCreate"));
+        assert!(
+            components
+                .schemas
+                .contains_key("TestItemWithDefaultsCreate")
+        );
         assert!(components.schemas.contains_key("TestItemWithNonDbAttrs"));
-        assert!(components.schemas.contains_key("TestItemWithNonDbAttrsCreate"));
-        assert!(components.schemas.contains_key("TestItemWithNonDbAttrsUpdate"));
-        
+        assert!(
+            components
+                .schemas
+                .contains_key("TestItemWithNonDbAttrsCreate")
+        );
+        assert!(
+            components
+                .schemas
+                .contains_key("TestItemWithNonDbAttrsUpdate")
+        );
+
         // Verify that non-db attributes are included in schemas
         let create_schema = &components.schemas["TestItemWithNonDbAttrsCreate"];
         let schema_str = serde_json::to_string(&create_schema).unwrap();
