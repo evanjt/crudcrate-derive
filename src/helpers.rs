@@ -51,6 +51,12 @@ pub(super) fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResource
                                 }
                             }
                         }
+                        // Handle boolean flags (like generate_router)
+                        else if let Meta::Path(path) = item {
+                            if path.is_ident("generate_router") {
+                                meta.generate_router = true;
+                            }
+                        }
                     }
                 }
             }
@@ -672,7 +678,7 @@ pub(super) fn generate_conditional_crud_impl(
         || !analysis.sortable_fields.is_empty()
         || !analysis.filterable_fields.is_empty();
 
-    if has_crud_resource_fields {
+    let crud_impl = if has_crud_resource_fields {
         generate_crud_resource_impl(
             api_struct_name,
             crud_meta,
@@ -683,6 +689,44 @@ pub(super) fn generate_conditional_crud_impl(
         )
     } else {
         quote! {}
+    };
+
+    let router_impl = if crud_meta.generate_router && has_crud_resource_fields {
+        generate_router_impl(api_struct_name)
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        #crud_impl
+        #router_impl
+    }
+}
+
+pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2::TokenStream {
+    let create_model_name = format_ident!("{}Create", api_struct_name);
+    let update_model_name = format_ident!("{}Update", api_struct_name);
+
+    quote! {
+        // Generate CRUD handlers using the crudcrate macro
+        crudcrate::crud_handlers!(#api_struct_name, #update_model_name, #create_model_name);
+
+        /// Generate router with all CRUD endpoints
+        pub fn router(db: &sea_orm::DatabaseConnection) -> utoipa_axum::router::OpenApiRouter
+        where
+            #api_struct_name: crudcrate::traits::CRUDResource,
+        {
+            use utoipa_axum::{router::OpenApiRouter, routes};
+
+            OpenApiRouter::new()
+                .routes(routes!(get_one_handler))
+                .routes(routes!(get_all_handler))
+                .routes(routes!(create_one_handler))
+                .routes(routes!(update_one_handler))
+                .routes(routes!(delete_one_handler))
+                .routes(routes!(delete_many_handler))
+                .with_state(db.clone())
+        }
     }
 }
 

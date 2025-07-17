@@ -107,13 +107,31 @@ generated structs.
 
 ## Including Auxiliary (Non-DB) Fields
 
-In some cases, you might want to include fields in your API models that do not directly map to columns in your database. For example, you might want to pass along auxiliary data that is handled separately in your business logic. You can achieve this by using the `non_db_attr` attribute. Fields marked with `#[crudcrate(non_db_attr = true, default = ...)]` will be included in the generated Create and Update models but will be omitted from the conversion into the database's ActiveModel.
+In some cases, you might want to include fields in your API models that do not directly map to columns in your database. For example, you might want to pass along auxiliary data that is handled separately in your business logic. You can achieve this by using the `non_db_attr` attribute combined with Sea-ORM's `ignore` attribute.
 
-For example, if you want to include a field to hold sensor data that is processed separately, you can annotate it as follows:
+**Important**: When using `EntityToModels` with `DeriveEntityModel`, you must use both attributes:
 
 ```rust
-#[crudcrate(non_db_attr = true, default = vec![])]
-pub data: Vec<crate::sensors::data::models::SensorData>,
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
+#[sea_orm(table_name = "projects")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: Uuid,
+    pub name: String,
+    
+    // Non-DB field: must have both attributes
+    #[sea_orm(ignore)]                                    // ← Required: excludes from database
+    #[crudcrate(non_db_attr = true, default = vec![])]   // ← Includes in API models
+    pub sensor_data: Vec<crate::sensors::data::models::SensorData>,
+}
 ```
 
-This field will appear in both the generated Create and Update models (e.g. ProjectCreate/ProjectUpdate or your corresponding model's structs), allowing you to handle it in your custom update or create logic without affecting the database operations.
+This field will appear in both the generated Create and Update models (e.g. ProjectCreate/ProjectUpdate), allowing you to handle it in your custom update or create logic without affecting the database operations.
+
+**Common Use Cases:**
+- Computed fields (e.g., `comment_count`, `is_favorite`)
+- Metadata that's stored elsewhere (e.g., `tags` from a separate service)
+- Temporary data for processing (e.g., `upload_urls`, `validation_errors`)
+- Related data for convenience (e.g., `author_name` instead of just `author_id`)
+
+**Note**: When using non-DB fields, you'll typically need to implement custom CRUD functions (especially `get_one` and `update`) to populate or handle these fields properly.

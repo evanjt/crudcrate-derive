@@ -14,7 +14,7 @@ pub(super) struct CRUDResourceMeta {
     pub(super) fn_update: Option<syn::Path>,
     pub(super) fn_delete: Option<syn::Path>,
     pub(super) fn_delete_many: Option<syn::Path>,
-    pub(super) non_db_fields: Vec<String>,
+    pub(super) generate_router: bool,
 }
 
 impl CRUDResourceMeta {
