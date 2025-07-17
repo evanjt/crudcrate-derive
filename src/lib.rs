@@ -1,3 +1,4 @@
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::parse::Parser;
@@ -5,7 +6,33 @@ use syn::{
     parse_macro_input, punctuated::Punctuated, token::Comma, Data, DeriveInput, Fields, Lit, Meta,
 };
 
-/// Returns true if the field’s type is `Option<…>` (including `std::option::Option<…>`).
+/// Extract table name from sea_orm(table_name = "...") attribute
+fn extract_table_name(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("sea_orm") {
+            if let Meta::List(meta_list) = &attr.meta {
+                if let Ok(metas) =
+                    Punctuated::<Meta, Comma>::parse_terminated.parse2(meta_list.tokens.clone())
+                {
+                    for meta in metas.iter() {
+                        if let Meta::NameValue(nv) = meta {
+                            if nv.path.is_ident("table_name") {
+                                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                    if let Lit::Str(s) = &expr_lit.lit {
+                                        return Some(s.value());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if the field's type is `Option<…>` (including `std::option::Option<…>`).
 fn field_is_optional(field: &syn::Field) -> bool {
     if let syn::Type::Path(type_path) = &field.ty {
         // Look at the *last* segment in the path to see if its identifier is "Option"
@@ -79,6 +106,107 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
         }
     }
     None
+}
+
+/// Given a field, checks if it has a specific flag in `#[crudcrate(...)]` attribute.
+/// For example, `#[crudcrate(primary_key, sortable)]` would return true for both "primary_key" and "sortable".
+fn field_has_crudcrate_flag(field: &syn::Field, flag: &str) -> bool {
+    for attr in &field.attrs {
+        if attr.path().is_ident("crudcrate") {
+            if let Meta::List(meta_list) = &attr.meta {
+                if let Ok(metas) =
+                    Punctuated::<Meta, Comma>::parse_terminated.parse2(meta_list.tokens.clone())
+                {
+                    for meta in metas.iter() {
+                        if let Meta::Path(path) = meta {
+                            if path.is_ident(flag) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extracts CRUDResource metadata from struct-level crudcrate attributes
+#[derive(Default)]
+struct CRUDResourceMeta {
+    name_singular: Option<String>,
+    name_plural: Option<String>,
+    description: Option<String>,
+    entity_type: Option<String>,
+    column_type: Option<String>,
+}
+
+impl CRUDResourceMeta {
+    /// Apply smart defaults based on table name and api struct name
+    fn with_defaults(mut self, table_name: &str, _api_struct_name: &str) -> Self {
+        if self.name_singular.is_none() {
+            self.name_singular = Some(table_name.to_case(Case::Snake));
+        }
+        if self.name_plural.is_none() {
+            // Simple pluralization - add 's' if doesn't end with 's'
+            let singular = self.name_singular.as_ref().unwrap();
+            self.name_plural = Some(if singular.ends_with('s') {
+                singular.clone()
+            } else {
+                format!("{}s", singular)
+            });
+        }
+        if self.description.is_none() {
+            self.description = Some(format!(
+                "This resource manages {} items",
+                self.name_singular.as_ref().unwrap()
+            ));
+        }
+        if self.entity_type.is_none() {
+            self.entity_type = Some("Entity".to_string());
+        }
+        if self.column_type.is_none() {
+            self.column_type = Some("Column".to_string());
+        }
+        self
+    }
+}
+
+fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResourceMeta {
+    let mut meta = CRUDResourceMeta::default();
+
+    for attr in attrs {
+        if attr.path().is_ident("crudcrate") {
+            if let Meta::List(meta_list) = &attr.meta {
+                if let Ok(metas) =
+                    Punctuated::<Meta, Comma>::parse_terminated.parse2(meta_list.tokens.clone())
+                {
+                    for item in metas.iter() {
+                        if let Meta::NameValue(nv) = item {
+                            if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                if let Lit::Str(s) = &expr_lit.lit {
+                                    let value = s.value();
+                                    if nv.path.is_ident("name_singular") {
+                                        meta.name_singular = Some(value);
+                                    } else if nv.path.is_ident("name_plural") {
+                                        meta.name_plural = Some(value);
+                                    } else if nv.path.is_ident("description") {
+                                        meta.description = Some(value);
+                                    } else if nv.path.is_ident("entity_type") {
+                                        meta.entity_type = Some(value);
+                                    } else if nv.path.is_ident("column_type") {
+                                        meta.column_type = Some(value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    meta
 }
 
 /// ===================
@@ -489,7 +617,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(EntityToModels, attributes(crudcrate))]
 pub fn entity_to_models(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    
+
     // Extract the struct name and fields
     let struct_name = &input.ident;
     let fields = match &input.data {
@@ -514,12 +642,12 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
     // Extract attributes from the struct level
     let mut api_struct_name = None;
     let mut active_model_path = None;
-    
+
     for attr in &input.attrs {
         if attr.path().is_ident("crudcrate") {
             if let Meta::List(meta_list) = &attr.meta {
-                if let Ok(metas) = Punctuated::<Meta, Comma>::parse_terminated
-                    .parse2(meta_list.tokens.clone())
+                if let Ok(metas) =
+                    Punctuated::<Meta, Comma>::parse_terminated.parse2(meta_list.tokens.clone())
                 {
                     for meta in metas.iter() {
                         if let Meta::NameValue(nv) = meta {
@@ -543,28 +671,24 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
         }
     }
 
+    // Auto-generate api_struct name from table name or struct name
+    let table_name = extract_table_name(&input.attrs).unwrap_or_else(|| struct_name.to_string());
     let api_struct_name = match api_struct_name {
         Some(name) => name,
         None => {
-            return syn::Error::new_spanned(
-                &input,
-                "EntityToModels requires an `api_struct` attribute, e.g., #[crudcrate(api_struct = \"Experiment\")]",
-            )
-            .to_compile_error()
-            .into();
+            // Convert to PascalCase (e.g., "todo" -> "Todo", "user_profiles" -> "UserProfile")
+            format_ident!("{}", table_name.to_case(Case::Pascal))
         }
     };
 
+    // Parse CRUDResource metadata and apply smart defaults
+    let crud_meta = parse_crud_resource_meta(&input.attrs)
+        .with_defaults(&table_name, &api_struct_name.to_string());
+
+    // Auto-generate active_model path (assume it's in the same module)
     let active_model_path = match active_model_path {
         Some(path) => path,
-        None => {
-            return syn::Error::new_spanned(
-                &input,
-                "EntityToModels requires an `active_model` attribute, e.g., #[crudcrate(active_model = \"spice_entity::experiments::ActiveModel\")]",
-            )
-            .to_compile_error()
-            .into();
-        }
+        None => "ActiveModel".to_string(), // Default to local ActiveModel
     };
 
     // Parse the active model path
@@ -580,40 +704,70 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Separate DB fields from non-DB fields
+    // Separate DB fields from non-DB fields and analyze for CRUDResource generation
     let mut db_fields = Vec::new();
     let mut non_db_fields = Vec::new();
-    
+    let mut primary_key_field = None;
+    let mut sortable_fields = Vec::new();
+    let mut filterable_fields = Vec::new();
+
     for field in fields.iter() {
         let is_non_db = get_crudcrate_bool(field, "non_db_attr").unwrap_or(false);
         if is_non_db {
             non_db_fields.push(field);
         } else {
             db_fields.push(field);
+
+            // Check for CRUDResource-related flags
+            if field_has_crudcrate_flag(field, "primary_key") {
+                if primary_key_field.is_some() {
+                    return syn::Error::new_spanned(
+                        field,
+                        "Only one field can be marked with 'primary_key' attribute",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                primary_key_field = Some(field);
+            }
+
+            if field_has_crudcrate_flag(field, "sortable") {
+                sortable_fields.push(field);
+            }
+
+            if field_has_crudcrate_flag(field, "filterable") {
+                filterable_fields.push(field);
+            }
         }
     }
 
     // Generate the API struct fields
     let mut api_struct_fields = Vec::new();
     let mut from_model_assignments = Vec::new();
-    
+
     // Add DB fields
     for field in &db_fields {
         let field_name = &field.ident;
         let field_type = &field.ty;
-        
+
         // Filter out sea_orm attributes for the API struct
-        let api_field_attrs: Vec<_> = field.attrs.iter()
+        let api_field_attrs: Vec<_> = field
+            .attrs
+            .iter()
             .filter(|attr| !attr.path().is_ident("sea_orm"))
             .collect();
-        
+
         api_struct_fields.push(quote! {
             #(#api_field_attrs)*
             pub #field_name: #field_type
         });
-        
+
         // Handle DateTime conversion from DateTimeWithTimeZone
-        let assignment = if field_type.to_token_stream().to_string().contains("DateTimeWithTimeZone") {
+        let assignment = if field_type
+            .to_token_stream()
+            .to_string()
+            .contains("DateTimeWithTimeZone")
+        {
             if field_is_optional(field) {
                 quote! {
                     #field_name: model.#field_name.map(|dt| dt.with_timezone(&chrono::Utc))
@@ -628,31 +782,37 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
                 #field_name: model.#field_name
             }
         };
-        
+
         from_model_assignments.push(assignment);
     }
-    
+
     // Add non-DB fields with default values
     for field in &non_db_fields {
         let field_name = &field.ident;
         let field_type = &field.ty;
-        
+
         // Get default value from attribute
         let default_expr = get_crudcrate_expr(field, "default")
             .unwrap_or_else(|| syn::parse_quote!(Default::default()));
-        
+
         api_struct_fields.push(quote! {
             #[crudcrate(non_db_attr = true, default = #default_expr)]
             pub #field_name: #field_type
         });
-        
+
         from_model_assignments.push(quote! {
             #field_name: #default_expr
         });
     }
 
-    // Generate the API struct
+    // Generate the API struct with necessary imports
     let api_struct = quote! {
+        // Import required traits for the generated derive macros
+        use utoipa::ToSchema;
+        use serde::{Serialize, Deserialize};
+        use crudcrate_derive::{ToUpdateModel, ToCreateModel};
+        use sea_orm::ActiveValue;
+
         #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel, Clone)]
         #[active_model = #active_model_path]
         pub struct #api_struct_name {
@@ -671,12 +831,132 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate CRUDResource implementation if any field has CRUDResource metadata or field flags
+    let has_crud_resource_fields =
+        primary_key_field.is_some() || !sortable_fields.is_empty() || !filterable_fields.is_empty();
+    let crud_impl = if has_crud_resource_fields {
+        generate_crud_resource_impl(
+            &api_struct_name,
+            &crud_meta,
+            &active_model_path,
+            primary_key_field,
+            &sortable_fields,
+            &filterable_fields,
+        )
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #api_struct
         #from_impl
+        #crud_impl
     };
 
     TokenStream::from(expanded)
+}
+
+/// Generates the CRUDResource implementation based on the provided metadata and field analysis
+fn generate_crud_resource_impl(
+    api_struct_name: &syn::Ident,
+    crud_meta: &CRUDResourceMeta,
+    active_model_path: &str,
+    primary_key_field: Option<&syn::Field>,
+    sortable_fields: &[&syn::Field],
+    filterable_fields: &[&syn::Field],
+) -> proc_macro2::TokenStream {
+    // Create the type aliases
+    let create_model_name = format_ident!("{}Create", api_struct_name);
+    let update_model_name = format_ident!("{}Update", api_struct_name);
+
+    // Parse entity and column types
+    let entity_type: syn::Type = crud_meta
+        .entity_type
+        .as_ref()
+        .and_then(|s| syn::parse_str(s).ok())
+        .unwrap_or_else(|| syn::parse_quote!(Entity));
+
+    let column_type: syn::Type = crud_meta
+        .column_type
+        .as_ref()
+        .and_then(|s| syn::parse_str(s).ok())
+        .unwrap_or_else(|| syn::parse_quote!(Column));
+
+    // For CRUDResource, we need the ActiveModel type, not Entity
+    let active_model_type: syn::Type =
+        syn::parse_str(&active_model_path).unwrap_or_else(|_| syn::parse_quote!(ActiveModel));
+
+    // Generate ID_COLUMN constant
+    let id_column = if let Some(pk_field) = primary_key_field {
+        let field_name = &pk_field.ident.as_ref().unwrap();
+        let column_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
+        quote! { Self::ColumnType::#column_name }
+    } else {
+        quote! { Self::ColumnType::Id }
+    };
+
+    // Generate sortable_columns function
+    let sortable_entries: Vec<_> = sortable_fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_str = field_name.to_string();
+            let column_name = format_ident!("{}", field_str.to_case(Case::Pascal));
+            quote! { (#field_str, Self::ColumnType::#column_name) }
+        })
+        .collect();
+
+    // Generate filterable_columns function
+    let filterable_entries: Vec<_> = filterable_fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_str = field_name.to_string();
+            let column_name = format_ident!("{}", field_str.to_case(Case::Pascal));
+            quote! { (#field_str, Self::ColumnType::#column_name) }
+        })
+        .collect();
+
+    // Resource name constants
+    let name_singular = crud_meta
+        .name_singular
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("resource");
+    let name_plural = crud_meta
+        .name_plural
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("resources");
+    let description = crud_meta
+        .description
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    quote! {
+        #[async_trait::async_trait]
+        impl crudcrate::CRUDResource for #api_struct_name {
+            type EntityType = #entity_type;
+            type ColumnType = #column_type;
+            type ActiveModelType = #active_model_type;
+            type CreateModel = #create_model_name;
+            type UpdateModel = #update_model_name;
+
+            const ID_COLUMN: Self::ColumnType = #id_column;
+            const RESOURCE_NAME_SINGULAR: &'static str = #name_singular;
+            const RESOURCE_NAME_PLURAL: &'static str = #name_plural;
+            const RESOURCE_DESCRIPTION: &'static str = #description;
+
+            fn sortable_columns() -> Vec<(&'static str, Self::ColumnType)> {
+                vec![#(#sortable_entries),*]
+            }
+
+            fn filterable_columns() -> Vec<(&'static str, Self::ColumnType)> {
+                vec![#(#filterable_entries),*]
+            }
+        }
+    }
 }
 
 #[cfg(test)]
