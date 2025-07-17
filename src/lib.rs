@@ -90,8 +90,8 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 ///    If a field has an `on_create` expression, its type becomes `Option<…>`
 ///    (with `#[serde(default)]`) so the user can override that default.
 /// 2. Generates an `impl From<<OriginalName>Create> for <ActiveModelType>>` where:
-///    – For each field with `on_create`:
-///       • If the original type was `Option<T>`, then `create.<field>` is `Option<Option<T>>`.
+///    - For each field with `on_create`:
+///       - If the original type was `Option<T>`, then `create.<field>` is `Option<Option<T>>`.
 ///         We match on that and do:
 ///           ```rust
 ///           match create.field {
@@ -100,7 +100,7 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 ///             None          => Some((expr).into()), // fallback to expr
 ///           }
 ///           ```
-///       • If the original type was non‐optional `T`, then `create.<field>` is `Option<T>`.
+///       - If the original type was non‐optional `T`, then `create.<field>` is `Option<T>`.
 ///         We match on that and do:
 ///           ```rust
 ///           match create.field {
@@ -108,11 +108,11 @@ fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 ///             None    => (expr).into(),
 ///           }
 ///           ```
-///    – For each field without `on_create`:
-///       • If the original type was `Option<T>`, we do `create.<field>.map(|v| v.into())`.
-///       • If it was non‐optional `T`, we do `create.<field>.into()`.
-///    – For any field excluded (`create_model = false`) but having `on_create`, we do
-///       `Some((expr).into())` if it was `Option<T>`, or just `(expr).into()` otherwise.
+///    - For each field without `on_create`:
+///       - If the original type was `Option<T>`, we do `create.<field>.map(|v| v.into())`.
+///       - If it was non‐optional `T`, we do `create.<field>.into()`.
+///    - For any field excluded (`create_model = false`) but having `on_create`, we do
+///      `Some((expr).into())` if it was `Option<T>`, or just `(expr).into()` otherwise.
 #[proc_macro_derive(ToCreateModel, attributes(crudcrate))]
 pub fn to_create_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -270,22 +270,22 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
 /// 2. Generates an impl for a method
 ///    `merge_into_activemodel(self, mut model: ActiveModelType) -> ActiveModelType`
 ///    that, for each field:
-///    – If it’s included in the update struct, and the user provided a value:
-///       • If the original field type was `Option<T>`, we match on
+///    - If it’s included in the update struct, and the user provided a value:
+///       - If the original field type was `Option<T>`, we match on
 ///         `Option<Option<T>>`:
 ///           ```rust
 ///           Some(Some(v)) => ActiveValue::Set(Some(v.into())),
 ///           Some(None)    => ActiveValue::Set(None),     // explicit set to None
 ///           None          => ActiveValue::NotSet,       // no change
 ///           ```  
-///       • If the original field type was non‐optional `T`, we match on `Option<T>`:
+///       - If the original field type was non‐optional `T`, we match on `Option<T>`:
 ///           ```rust
 ///           Some(val) => ActiveValue::Set(val.into()),
 ///           _         => ActiveValue::NotSet,
 ///           ```  
-///    – If it’s excluded (`update_model = false`) but has `on_update = expr`, we do
+///    - If it’s excluded (`update_model = false`) but has `on_update = expr`, we do
 ///      `ActiveValue::Set(expr.into())` (wrapped in `Some(...)` if the original field was `Option<T>`).
-///    – All other fields remain unchanged.
+///    - All other fields remain unchanged.
 #[proc_macro_derive(ToUpdateModel, attributes(crudcrate, active_model))]
 pub fn to_update_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
