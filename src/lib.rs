@@ -49,7 +49,7 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
     let conv_lines = helpers::generate_create_conversion_lines(&fields);
 
     let expanded = quote! {
-        #[derive(Clone, Serialize, Deserialize, ToSchema)]
+        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #create_name {
             #(#create_struct_fields),*
         }
@@ -105,21 +105,21 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         helpers::generate_update_merge_code(&fields, &included_fields);
 
     let expanded = quote! {
-        #[derive(Clone, Serialize, Deserialize, ToSchema)]
+        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #update_name {
             #(#update_struct_fields),*
         }
 
         impl #update_name {
-            pub fn merge_fields(self, mut model: #active_model_type) -> #active_model_type {
+            pub fn merge_fields(self, mut model: #active_model_type) -> Result<#active_model_type, sea_orm::DbErr> {
                 #(#included_merge)*
                 #(#excluded_merge)*
-                model
+                Ok(model)
             }
         }
 
         impl crudcrate::traits::MergeIntoActiveModel<#active_model_type> for #update_name {
-            fn merge_into_activemodel(self, model: #active_model_type) -> #active_model_type {
+            fn merge_into_activemodel(self, model: #active_model_type) -> Result<#active_model_type, sea_orm::DbErr> {
                 Self::merge_fields(self, model)
             }
         }
@@ -136,7 +136,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
 ///
 /// ## Available Struct-Level Attributes
 ///
-/// ```rust
+/// ```rust,ignore
 /// #[crudcrate(
 ///     api_struct = "TodoItem",              // Override API struct name
 ///     active_model = "ActiveModel",         // Override ActiveModel path  
@@ -156,7 +156,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
 ///
 /// ## Available Field-Level Attributes
 ///
-/// ```rust
+/// ```rust,ignore
 /// #[crudcrate(
 ///     primary_key,                          // Mark as primary key
 ///     sortable,                             // Include in sortable columns

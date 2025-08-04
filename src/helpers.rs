@@ -16,21 +16,30 @@ pub(super) fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResource
                 {
                     for item in metas {
                         if let Meta::NameValue(nv) = item {
-                            // Handle string literal values (for names, descriptions, etc.)
+                            // Handle literal values (strings, booleans, etc.)
                             if let syn::Expr::Lit(expr_lit) = &nv.value {
-                                if let Lit::Str(s) = &expr_lit.lit {
-                                    let value = s.value();
-                                    if nv.path.is_ident("name_singular") {
-                                        meta.name_singular = Some(value);
-                                    } else if nv.path.is_ident("name_plural") {
-                                        meta.name_plural = Some(value);
-                                    } else if nv.path.is_ident("description") {
-                                        meta.description = Some(value);
-                                    } else if nv.path.is_ident("entity_type") {
-                                        meta.entity_type = Some(value);
-                                    } else if nv.path.is_ident("column_type") {
-                                        meta.column_type = Some(value);
-                                    }
+                                match &expr_lit.lit {
+                                    Lit::Str(s) => {
+                                        let value = s.value();
+                                        if nv.path.is_ident("name_singular") {
+                                            meta.name_singular = Some(value);
+                                        } else if nv.path.is_ident("name_plural") {
+                                            meta.name_plural = Some(value);
+                                        } else if nv.path.is_ident("description") {
+                                            meta.description = Some(value);
+                                        } else if nv.path.is_ident("entity_type") {
+                                            meta.entity_type = Some(value);
+                                        } else if nv.path.is_ident("column_type") {
+                                            meta.column_type = Some(value);
+                                        }
+                                    },
+                                    Lit::Bool(b) => {
+                                        let value = b.value;
+                                        if nv.path.is_ident("enum_case_sensitive") {
+                                            meta.enum_case_sensitive = value;
+                                        }
+                                    },
+                                    _ => {}
                                 }
                             }
                             // Handle path values (for function references)
@@ -55,6 +64,8 @@ pub(super) fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResource
                         else if let Meta::Path(path) = item {
                             if path.is_ident("generate_router") {
                                 meta.generate_router = true;
+                            } else if path.is_ident("enum_case_sensitive") {
+                                meta.enum_case_sensitive = true;
                             }
                         }
                     }
@@ -105,6 +116,7 @@ pub(super) fn field_is_optional(field: &syn::Field) -> bool {
         false
     }
 }
+
 
 /// Given a field and a key (e.g. `"create_model"` or `"update_model"`),
 /// look for a `#[crudcrate(...)]` attribute on the field and return the boolean value
@@ -413,7 +425,13 @@ pub(super) fn generate_included_merge_code(
                 quote! {
                     model.#ident = match self.#ident {
                         Some(Some(value)) => ActiveValue::Set(value.into()),
-                        _                 => ActiveValue::NotSet,
+                        Some(None) => {
+                            return Err(sea_orm::DbErr::Custom(format!(
+                                "Field '{}' is required and cannot be set to null", 
+                                stringify!(#ident)
+                            )));
+                        },
+                        None => ActiveValue::NotSet,
                     };
                 }
             }
@@ -526,6 +544,7 @@ pub(super) fn analyze_entity_fields(
         primary_key_field: None,
         sortable_fields: Vec::new(),
         filterable_fields: Vec::new(),
+        fulltext_fields: Vec::new(),
     };
 
     for field in fields {
@@ -543,6 +562,9 @@ pub(super) fn analyze_entity_fields(
             }
             if field_has_crudcrate_flag(field, "filterable") {
                 analysis.filterable_fields.push(field);
+            }
+            if field_has_crudcrate_flag(field, "fulltext") {
+                analysis.fulltext_fields.push(field);
             }
         }
     }
@@ -639,10 +661,10 @@ pub(super) fn generate_api_struct(
     active_model_path: &str,
 ) -> proc_macro2::TokenStream {
     quote! {
+        use sea_orm::ActiveValue;
         use utoipa::ToSchema;
         use serde::{Serialize, Deserialize};
         use crudcrate_derive::{ToUpdateModel, ToCreateModel};
-        use sea_orm::ActiveValue;
 
         #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel, Clone)]
         #[active_model = #active_model_path]
@@ -676,7 +698,8 @@ pub(super) fn generate_conditional_crud_impl(
 ) -> proc_macro2::TokenStream {
     let has_crud_resource_fields = analysis.primary_key_field.is_some()
         || !analysis.sortable_fields.is_empty()
-        || !analysis.filterable_fields.is_empty();
+        || !analysis.filterable_fields.is_empty()
+        || !analysis.fulltext_fields.is_empty();
 
     let crud_impl = if has_crud_resource_fields {
         generate_crud_resource_impl(
@@ -686,6 +709,7 @@ pub(super) fn generate_conditional_crud_impl(
             analysis.primary_key_field,
             &analysis.sortable_fields,
             &analysis.filterable_fields,
+            &analysis.fulltext_fields,
         )
     } else {
         quote! {}
@@ -717,15 +741,20 @@ pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2:
             #api_struct_name: crudcrate::traits::CRUDResource,
         {
             use utoipa_axum::{router::OpenApiRouter, routes};
-
-            OpenApiRouter::new()
+            
+            let resource_path = format!("/{}", #api_struct_name::RESOURCE_NAME_PLURAL);
+            
+            let resource_router = OpenApiRouter::new()
                 .routes(routes!(get_one_handler))
                 .routes(routes!(get_all_handler))
                 .routes(routes!(create_one_handler))
                 .routes(routes!(update_one_handler))
                 .routes(routes!(delete_one_handler))
                 .routes(routes!(delete_many_handler))
-                .with_state(db.clone())
+                .with_state(db.clone());
+                
+            OpenApiRouter::new()
+                .nest(&resource_path, resource_router)
         }
     }
 }
@@ -784,6 +813,69 @@ pub(super) fn generate_field_entries(fields: &[&syn::Field]) -> Vec<proc_macro2:
             quote! { (#field_str, Self::ColumnType::#column_name) }
         })
         .collect()
+}
+
+pub(super) fn generate_like_filterable_entries(fields: &[&syn::Field]) -> Vec<proc_macro2::TokenStream> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_str = field_name.to_string();
+            
+            // Check if this field should use LIKE queries based on its type
+            if is_text_type(&field.ty) {
+                Some(quote! { #field_str })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(super) fn generate_fulltext_field_entries(fields: &[&syn::Field]) -> Vec<proc_macro2::TokenStream> {
+    fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let column_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
+            let field_str = field_name.to_string();
+            quote! { (#field_str, Self::ColumnType::#column_name) }
+        })
+        .collect()
+}
+
+/// Check if a type is a text type (String or &str), handling Option<T> wrappers
+fn is_text_type(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(type_path) => {
+            if let Some(last_seg) = type_path.path.segments.last() {
+                let ident = &last_seg.ident;
+                
+                // Handle Option<T> - check the inner type
+                if ident == "Option" {
+                    if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                            return is_text_type(inner_ty);
+                        }
+                    }
+                }
+                
+                // Check if it's String (could be std::string::String or just String)
+                ident == "String"
+            } else {
+                false
+            }
+        },
+        syn::Type::Reference(type_ref) => {
+            // Check if it's &str
+            if let syn::Type::Path(path) = &*type_ref.elem {
+                path.path.is_ident("str")
+            } else {
+                false
+            }
+        },
+        _ => false,
+    }
 }
 
 pub(super) fn generate_method_impls(
@@ -885,6 +977,7 @@ pub(super) fn generate_crud_resource_impl(
     primary_key_field: Option<&syn::Field>,
     sortable_fields: &[&syn::Field],
     filterable_fields: &[&syn::Field],
+    fulltext_fields: &[&syn::Field],
 ) -> proc_macro2::TokenStream {
     let (create_model_name, update_model_name, entity_type, column_type, active_model_type) =
         generate_crud_type_aliases(api_struct_name, crud_meta, active_model_path);
@@ -892,10 +985,13 @@ pub(super) fn generate_crud_resource_impl(
     let id_column = generate_id_column(primary_key_field);
     let sortable_entries = generate_field_entries(sortable_fields);
     let filterable_entries = generate_field_entries(filterable_fields);
+    let like_filterable_entries = generate_like_filterable_entries(filterable_fields);
+    let fulltext_entries = generate_fulltext_field_entries(fulltext_fields);
 
     let name_singular = crud_meta.name_singular.as_deref().unwrap_or("resource");
     let name_plural = crud_meta.name_plural.as_deref().unwrap_or("resources");
     let description = crud_meta.description.as_deref().unwrap_or("");
+    let enum_case_sensitive = crud_meta.enum_case_sensitive;
 
     let (get_one_impl, get_all_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
         generate_method_impls(crud_meta);
@@ -920,6 +1016,18 @@ pub(super) fn generate_crud_resource_impl(
 
             fn filterable_columns() -> Vec<(&'static str, Self::ColumnType)> {
                 vec![#(#filterable_entries),*]
+            }
+
+            fn enum_case_sensitive() -> bool {
+                #enum_case_sensitive
+            }
+
+            fn like_filterable_columns() -> Vec<&'static str> {
+                vec![#(#like_filterable_entries),*]
+            }
+
+            fn fulltext_searchable_columns() -> Vec<(&'static str, Self::ColumnType)> {
+                vec![#(#fulltext_entries),*]
             }
 
             #get_one_impl

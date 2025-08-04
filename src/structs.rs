@@ -15,6 +15,7 @@ pub(super) struct CRUDResourceMeta {
     pub(super) fn_delete: Option<syn::Path>,
     pub(super) fn_delete_many: Option<syn::Path>,
     pub(super) generate_router: bool,
+    pub(super) enum_case_sensitive: bool,
 }
 
 impl CRUDResourceMeta {
@@ -54,4 +55,5 @@ pub(super) struct EntityFieldAnalysis<'a> {
     pub(super) primary_key_field: Option<&'a syn::Field>,
     pub(super) sortable_fields: Vec<&'a syn::Field>,
     pub(super) filterable_fields: Vec<&'a syn::Field>,
+    pub(super) fulltext_fields: Vec<&'a syn::Field>,
 }

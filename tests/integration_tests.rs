@@ -177,7 +177,7 @@ mod tests {
             updated_at: Set(Utc::now()),
         };
 
-        let merged = update.merge_into_activemodel(existing);
+        let merged = update.merge_into_activemodel(existing).unwrap();
 
         assert_eq!(merged.name, Set("Updated Name".to_string()));
         assert_eq!(
@@ -202,7 +202,7 @@ mod tests {
             updated_at: Set(Utc::now()),
         };
 
-        let merged = update.merge_into_activemodel(existing);
+        let merged = update.merge_into_activemodel(existing).unwrap();
 
         assert_eq!(merged.name, Set("Updated Name".to_string()));
         assert!(matches!(merged.description, NotSet)); // Field not provided, so NotSet
@@ -223,7 +223,7 @@ mod tests {
             updated_at: Set(Utc::now()),
         };
 
-        let merged = update.merge_into_activemodel(existing);
+        let merged = update.merge_into_activemodel(existing).unwrap();
 
         assert!(matches!(merged.name, NotSet)); // Field not provided, so NotSet
         assert_eq!(merged.description, Set(None)); // Should be set to null
@@ -273,7 +273,7 @@ mod tests {
             updated_at: Set(Utc::now()),
         };
 
-        let merged = update.merge_into_activemodel(existing);
+        let merged = update.merge_into_activemodel(existing).unwrap();
 
         assert_eq!(merged.name, Set("Merged Name".to_string()));
         assert!(matches!(merged.description, NotSet)); // Field not provided, so NotSet
@@ -391,7 +391,7 @@ mod tests {
             updated_at: Set(Utc::now()),
         };
 
-        let merged = update.merge_into_activemodel(existing);
+        let merged = update.merge_into_activemodel(existing).unwrap();
 
         // Only database fields should be merged
         assert_eq!(merged.name, Set("Updated Item".to_string()));
