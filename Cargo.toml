@@ -1,6 +1,6 @@
 [package]
 name = "crudcrate-derive"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Procedural macros to help with CRUD API design using Axum and Sea-ORM in Rust"
 license = "MIT"
@@ -19,9 +19,9 @@ convert_case = "0.8.0"
 proc-macro = true
 
 [dev-dependencies]
-sea-orm = { version = "1.1.13", features = ["macros", "with-chrono", "with-uuid", "with-json"], default-features = false }
+sea-orm = { version = "1.1.14", features = ["macros", "with-chrono", "with-uuid", "with-json"], default-features = false }
 serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.137"
+serde_json = "1.0.142"
 serde_with = "3.14.0"
 chrono = { version = "0.4.41", features = ["serde"] }
 utoipa = { version = "5.4.0", features = ["chrono", "uuid", "decimal"] }
