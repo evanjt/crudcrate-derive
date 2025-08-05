@@ -665,7 +665,7 @@ pub(super) fn generate_api_struct(
         use serde::{Serialize, Deserialize};
         use crudcrate_derive::{ToUpdateModel, ToCreateModel};
 
-        #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel, Clone)]
+        #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel)]
         #[active_model = #active_model_path]
         pub struct #api_struct_name {
             #(#api_struct_fields),*
@@ -840,7 +840,7 @@ pub(super) fn generate_fulltext_field_entries(
 }
 
 /// Generate enum field checker using explicit annotations only
-/// Users must mark enum fields with #[crudcrate(enum_field)] for enum filtering to work
+/// Users must mark enum fields with `#[crudcrate(enum_field)]` for enum filtering to work
 fn generate_enum_field_checker(all_fields: &[&syn::Field]) -> proc_macro2::TokenStream {
     let field_checks: Vec<proc_macro2::TokenStream> = all_fields
         .iter()

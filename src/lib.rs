@@ -49,7 +49,7 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
     let conv_lines = helpers::generate_create_conversion_lines(&fields);
 
     let expanded = quote! {
-        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #create_name {
             #(#create_struct_fields),*
         }
@@ -105,7 +105,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         helpers::generate_update_merge_code(&fields, &included_fields);
 
     let expanded = quote! {
-        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #update_name {
             #(#update_struct_fields),*
         }
