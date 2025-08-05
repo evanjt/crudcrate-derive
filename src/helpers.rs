@@ -32,13 +32,13 @@ pub(super) fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResource
                                         } else if nv.path.is_ident("column_type") {
                                             meta.column_type = Some(value);
                                         }
-                                    },
+                                    }
                                     Lit::Bool(b) => {
                                         let value = b.value;
                                         if nv.path.is_ident("enum_case_sensitive") {
                                             meta.enum_case_sensitive = value;
                                         }
-                                    },
+                                    }
                                     _ => {}
                                 }
                             }
@@ -116,7 +116,6 @@ pub(super) fn field_is_optional(field: &syn::Field) -> bool {
         false
     }
 }
-
 
 /// Given a field and a key (e.g. `"create_model"` or `"update_model"`),
 /// look for a `#[crudcrate(...)]` attribute on the field and return the boolean value
@@ -427,7 +426,7 @@ pub(super) fn generate_included_merge_code(
                         Some(Some(value)) => ActiveValue::Set(value.into()),
                         Some(None) => {
                             return Err(sea_orm::DbErr::Custom(format!(
-                                "Field '{}' is required and cannot be set to null", 
+                                "Field '{}' is required and cannot be set to null",
                                 stringify!(#ident)
                             )));
                         },
@@ -702,15 +701,7 @@ pub(super) fn generate_conditional_crud_impl(
         || !analysis.fulltext_fields.is_empty();
 
     let crud_impl = if has_crud_resource_fields {
-        generate_crud_resource_impl(
-            api_struct_name,
-            crud_meta,
-            active_model_path,
-            analysis.primary_key_field,
-            &analysis.sortable_fields,
-            &analysis.filterable_fields,
-            &analysis.fulltext_fields,
-        )
+        generate_crud_resource_impl(api_struct_name, crud_meta, active_model_path, analysis)
     } else {
         quote! {}
     };
@@ -741,9 +732,9 @@ pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2:
             #api_struct_name: crudcrate::traits::CRUDResource,
         {
             use utoipa_axum::{router::OpenApiRouter, routes};
-            
+
             let resource_path = format!("/{}", #api_struct_name::RESOURCE_NAME_PLURAL);
-            
+
             let resource_router = OpenApiRouter::new()
                 .routes(routes!(get_one_handler))
                 .routes(routes!(get_all_handler))
@@ -752,7 +743,7 @@ pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2:
                 .routes(routes!(delete_one_handler))
                 .routes(routes!(delete_many_handler))
                 .with_state(db.clone());
-                
+
             OpenApiRouter::new()
                 .nest(&resource_path, resource_router)
         }
@@ -815,13 +806,15 @@ pub(super) fn generate_field_entries(fields: &[&syn::Field]) -> Vec<proc_macro2:
         .collect()
 }
 
-pub(super) fn generate_like_filterable_entries(fields: &[&syn::Field]) -> Vec<proc_macro2::TokenStream> {
+pub(super) fn generate_like_filterable_entries(
+    fields: &[&syn::Field],
+) -> Vec<proc_macro2::TokenStream> {
     fields
         .iter()
         .filter_map(|field| {
             let field_name = field.ident.as_ref().unwrap();
             let field_str = field_name.to_string();
-            
+
             // Check if this field should use LIKE queries based on its type
             if is_text_type(&field.ty) {
                 Some(quote! { #field_str })
@@ -832,7 +825,9 @@ pub(super) fn generate_like_filterable_entries(fields: &[&syn::Field]) -> Vec<pr
         .collect()
 }
 
-pub(super) fn generate_fulltext_field_entries(fields: &[&syn::Field]) -> Vec<proc_macro2::TokenStream> {
+pub(super) fn generate_fulltext_field_entries(
+    fields: &[&syn::Field],
+) -> Vec<proc_macro2::TokenStream> {
     fields
         .iter()
         .map(|field| {
@@ -844,13 +839,40 @@ pub(super) fn generate_fulltext_field_entries(fields: &[&syn::Field]) -> Vec<pro
         .collect()
 }
 
+/// Generate enum field checker using explicit annotations only
+/// Users must mark enum fields with #[crudcrate(enum_field)] for enum filtering to work
+fn generate_enum_field_checker(all_fields: &[&syn::Field]) -> proc_macro2::TokenStream {
+    let field_checks: Vec<proc_macro2::TokenStream> = all_fields
+        .iter()
+        .filter_map(|field| {
+            if let Some(field_name) = &field.ident {
+                let field_name_str = field_name.to_string();
+                let is_enum = field_has_crudcrate_flag(field, "enum_field");
+
+                Some(quote! {
+                    #field_name_str => #is_enum,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    quote! {
+        match field_name {
+            #(#field_checks)*
+            _ => false,
+        }
+    }
+}
+
 /// Check if a type is a text type (String or &str), handling Option<T> wrappers
 fn is_text_type(ty: &syn::Type) -> bool {
     match ty {
         syn::Type::Path(type_path) => {
             if let Some(last_seg) = type_path.path.segments.last() {
                 let ident = &last_seg.ident;
-                
+
                 // Handle Option<T> - check the inner type
                 if ident == "Option" {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
@@ -859,13 +881,13 @@ fn is_text_type(ty: &syn::Type) -> bool {
                         }
                     }
                 }
-                
+
                 // Check if it's String (could be std::string::String or just String)
                 ident == "String"
             } else {
                 false
             }
-        },
+        }
         syn::Type::Reference(type_ref) => {
             // Check if it's &str
             if let syn::Type::Path(path) = &*type_ref.elem {
@@ -873,7 +895,7 @@ fn is_text_type(ty: &syn::Type) -> bool {
             } else {
                 false
             }
-        },
+        }
         _ => false,
     }
 }
@@ -974,19 +996,17 @@ pub(super) fn generate_crud_resource_impl(
     api_struct_name: &syn::Ident,
     crud_meta: &CRUDResourceMeta,
     active_model_path: &str,
-    primary_key_field: Option<&syn::Field>,
-    sortable_fields: &[&syn::Field],
-    filterable_fields: &[&syn::Field],
-    fulltext_fields: &[&syn::Field],
+    analysis: &EntityFieldAnalysis,
 ) -> proc_macro2::TokenStream {
     let (create_model_name, update_model_name, entity_type, column_type, active_model_type) =
         generate_crud_type_aliases(api_struct_name, crud_meta, active_model_path);
 
-    let id_column = generate_id_column(primary_key_field);
-    let sortable_entries = generate_field_entries(sortable_fields);
-    let filterable_entries = generate_field_entries(filterable_fields);
-    let like_filterable_entries = generate_like_filterable_entries(filterable_fields);
-    let fulltext_entries = generate_fulltext_field_entries(fulltext_fields);
+    let id_column = generate_id_column(analysis.primary_key_field);
+    let sortable_entries = generate_field_entries(&analysis.sortable_fields);
+    let filterable_entries = generate_field_entries(&analysis.filterable_fields);
+    let like_filterable_entries = generate_like_filterable_entries(&analysis.filterable_fields);
+    let fulltext_entries = generate_fulltext_field_entries(&analysis.fulltext_fields);
+    let enum_field_checker = generate_enum_field_checker(&analysis.db_fields);
 
     let name_singular = crud_meta.name_singular.as_deref().unwrap_or("resource");
     let name_plural = crud_meta.name_plural.as_deref().unwrap_or("resources");
@@ -1020,6 +1040,11 @@ pub(super) fn generate_crud_resource_impl(
 
             fn enum_case_sensitive() -> bool {
                 #enum_case_sensitive
+            }
+
+
+            fn is_enum_field(field_name: &str) -> bool {
+                #enum_field_checker
             }
 
             fn like_filterable_columns() -> Vec<&'static str> {
