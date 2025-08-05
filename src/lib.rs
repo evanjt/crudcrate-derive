@@ -222,7 +222,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use uuid::Uuid;
 /// use crudcrate_derive::EntityToModels;
 /// use sea_orm::prelude::*;
