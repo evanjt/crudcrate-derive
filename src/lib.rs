@@ -49,7 +49,7 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
     let conv_lines = helpers::generate_create_conversion_lines(&fields);
 
     let expanded = quote! {
-        #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #create_name {
             #(#create_struct_fields),*
         }
@@ -105,7 +105,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         helpers::generate_update_merge_code(&fields, &included_fields);
 
     let expanded = quote! {
-        #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #update_name {
             #(#update_struct_fields),*
         }
@@ -121,6 +121,71 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         impl crudcrate::traits::MergeIntoActiveModel<#active_model_type> for #update_name {
             fn merge_into_activemodel(self, model: #active_model_type) -> Result<#active_model_type, sea_orm::DbErr> {
                 Self::merge_fields(self, model)
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// ===================
+/// `ToListModel` Macro
+/// ===================
+/// This macro generates a struct named `<OriginalName>List` that includes only the fields
+/// where `#[crudcrate(list_model = false)]` is NOT specified (default = true).
+/// This allows creating optimized list views by excluding heavy fields like relationships,
+/// large text fields, or computed properties from collection endpoints.
+///
+/// Generated struct:
+/// ```rust,ignore
+/// #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+/// pub struct <OriginalName>List {
+///     // All fields where list_model != false
+///     pub field_name: FieldType,
+/// }
+///
+/// impl From<Model> for <OriginalName>List {
+///     fn from(model: Model) -> Self {
+///         Self {
+///             field_name: model.field_name,
+///             // ... other included fields
+///         }
+///     }
+/// }
+/// ```
+///
+/// Usage:
+/// ```rust,ignore
+/// pub struct Model {
+///     pub id: Uuid,
+///     pub name: String,
+///     #[crudcrate(list_model = false)]  // Exclude from list view
+///     pub large_description: Option<String>,
+///     #[crudcrate(list_model = false)]  // Exclude relationships from list
+///     pub related_items: Vec<RelatedItem>,
+/// }
+/// ```
+#[proc_macro_derive(ToListModel, attributes(crudcrate))]
+pub fn to_list_model(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let list_name = format_ident!("{}List", name);
+
+    let fields = helpers::extract_named_fields(&input);
+    let list_struct_fields = helpers::generate_list_struct_fields(&fields);
+    let list_from_assignments = helpers::generate_list_from_assignments(&fields);
+
+    let expanded = quote! {
+        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        pub struct #list_name {
+            #(#list_struct_fields),*
+        }
+
+        impl From<#name> for #list_name {
+            fn from(model: #name) -> Self {
+                Self {
+                    #(#list_from_assignments),*
+                }
             }
         }
     };
@@ -290,11 +355,33 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
         &active_model_path,
         &field_analysis,
     );
+    
+    // Generate List model struct and implementation
+    let list_name = format_ident!("{}List", &api_struct_name);
+    let raw_fields = helpers::extract_named_fields(&input);
+    let list_struct_fields = helpers::generate_list_struct_fields(&raw_fields);
+    let list_from_assignments = helpers::generate_list_from_assignments(&raw_fields);
+    
+    let list_model = quote! {
+        #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        pub struct #list_name {
+            #(#list_struct_fields),*
+        }
+
+        impl From<#api_struct_name> for #list_name {
+            fn from(model: #api_struct_name) -> Self {
+                Self {
+                    #(#list_from_assignments),*
+                }
+            }
+        }
+    };
 
     let expanded = quote! {
         #api_struct
         #from_impl
         #crud_impl
+        #list_model
     };
 
     TokenStream::from(expanded)

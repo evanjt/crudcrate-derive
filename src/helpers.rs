@@ -663,9 +663,9 @@ pub(super) fn generate_api_struct(
         use sea_orm::ActiveValue;
         use utoipa::ToSchema;
         use serde::{Serialize, Deserialize};
-        use crudcrate_derive::{ToUpdateModel, ToCreateModel};
+        use crudcrate::{ToUpdateModel, ToCreateModel};
 
-        #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel)]
+        #[derive(Clone, Debug, PartialEq, Eq, ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel)]
         #[active_model = #active_model_path]
         pub struct #api_struct_name {
             #(#api_struct_fields),*
@@ -721,10 +721,11 @@ pub(super) fn generate_conditional_crud_impl(
 pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2::TokenStream {
     let create_model_name = format_ident!("{}Create", api_struct_name);
     let update_model_name = format_ident!("{}Update", api_struct_name);
+    let list_model_name = format_ident!("{}List", api_struct_name);
 
     quote! {
         // Generate CRUD handlers using the crudcrate macro
-        crudcrate::crud_handlers!(#api_struct_name, #update_model_name, #create_model_name);
+        crudcrate::crud_handlers!(#api_struct_name, #update_model_name, #create_model_name, #list_model_name);
 
         /// Generate router with all CRUD endpoints
         pub fn router(db: &sea_orm::DatabaseConnection) -> utoipa_axum::router::OpenApiRouter
@@ -754,9 +755,10 @@ pub(super) fn generate_crud_type_aliases(
     api_struct_name: &syn::Ident,
     crud_meta: &CRUDResourceMeta,
     active_model_path: &str,
-) -> (syn::Ident, syn::Ident, syn::Type, syn::Type, syn::Type) {
+) -> (syn::Ident, syn::Ident, syn::Ident, syn::Type, syn::Type, syn::Type) {
     let create_model_name = format_ident!("{}Create", api_struct_name);
     let update_model_name = format_ident!("{}Update", api_struct_name);
+    let list_model_name = format_ident!("{}List", api_struct_name);
 
     let entity_type: syn::Type = crud_meta
         .entity_type
@@ -776,6 +778,7 @@ pub(super) fn generate_crud_type_aliases(
     (
         create_model_name,
         update_model_name,
+        list_model_name,
         entity_type,
         column_type,
         active_model_type,
@@ -998,7 +1001,7 @@ pub(super) fn generate_crud_resource_impl(
     active_model_path: &str,
     analysis: &EntityFieldAnalysis,
 ) -> proc_macro2::TokenStream {
-    let (create_model_name, update_model_name, entity_type, column_type, active_model_type) =
+    let (create_model_name, update_model_name, list_model_name, entity_type, column_type, active_model_type) =
         generate_crud_type_aliases(api_struct_name, crud_meta, active_model_path);
 
     let id_column = generate_id_column(analysis.primary_key_field);
@@ -1024,6 +1027,7 @@ pub(super) fn generate_crud_resource_impl(
             type ActiveModelType = #active_model_type;
             type CreateModel = #create_model_name;
             type UpdateModel = #update_model_name;
+            type ListModel = #list_model_name;
 
             const ID_COLUMN: Self::ColumnType = #id_column;
             const RESOURCE_NAME_SINGULAR: &'static str = #name_singular;
@@ -1063,6 +1067,45 @@ pub(super) fn generate_crud_resource_impl(
             #delete_many_impl
         }
     }
+}
+
+// ===================
+// List Model Helpers
+// ===================
+
+/// Generate struct fields for List models, including only fields where list_model != false
+pub(super) fn generate_list_struct_fields(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+) -> Vec<proc_macro2::TokenStream> {
+    fields
+        .iter()
+        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
+        .map(|field| {
+            let ident = &field.ident;
+            let ty = &field.ty;
+            
+            quote! {
+                pub #ident: #ty
+            }
+        })
+        .collect()
+}
+
+/// Generate From assignments for List models
+pub(super) fn generate_list_from_assignments(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+) -> Vec<proc_macro2::TokenStream> {
+    fields
+        .iter()
+        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
+        .map(|field| {
+            let ident = &field.ident;
+            
+            quote! {
+                #ident: model.#ident
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
