@@ -905,7 +905,9 @@ fn is_text_type(ty: &syn::Type) -> bool {
 
 pub(super) fn generate_method_impls(
     crud_meta: &CRUDResourceMeta,
+    analysis: &EntityFieldAnalysis,
 ) -> (
+    proc_macro2::TokenStream,
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
@@ -984,14 +986,127 @@ pub(super) fn generate_method_impls(
         quote! {}
     };
 
+    // Generate optimized get_all_list if there are fields excluded from ListModel
+    let get_all_list_impl = generate_get_all_list_impl(crud_meta, analysis);
+
     (
         get_one_impl,
         get_all_impl,
+        get_all_list_impl,
         create_impl,
         update_impl,
         delete_impl,
         delete_many_impl,
     )
+}
+
+/// Generates optimized get_all_list implementation with selective column fetching
+fn generate_get_all_list_impl(
+    _crud_meta: &CRUDResourceMeta,
+    analysis: &EntityFieldAnalysis,
+) -> proc_macro2::TokenStream {
+    // Check if there are fields excluded from ListModel (list_model = false)
+    let has_excluded_list_fields = analysis.db_fields.iter().any(|field| {
+        get_crudcrate_bool(field, "list_model") == Some(false)
+    }) || analysis.non_db_fields.iter().any(|field| {
+        get_crudcrate_bool(field, "list_model") == Some(false)
+    });
+
+    if !has_excluded_list_fields {
+        // If no fields are excluded, use default implementation
+        return quote! {};
+    }
+
+    // Generate selective column list for ListModel (only db_fields included in list)
+    let list_columns: Vec<proc_macro2::TokenStream> = analysis.db_fields
+        .iter()
+        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let column_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
+            quote! { Self::ColumnType::#column_name }
+        })
+        .collect();
+
+    // Generate FromQueryResult struct fields (only db fields)
+    let query_result_fields: Vec<proc_macro2::TokenStream> = analysis.db_fields
+        .iter()
+        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
+        .map(|field| {
+            let field_name = &field.ident;
+            let field_type = &field.ty;
+            quote! { pub #field_name: #field_type }
+        })
+        .collect();
+
+    // Generate field assignments for creating the full struct from query result
+    let full_struct_assignments: Vec<proc_macro2::TokenStream> = analysis.db_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            if get_crudcrate_bool(field, "list_model").unwrap_or(true) {
+                // Field is included in ListModel - use actual data
+                quote! { #field_name: query_data.#field_name }
+            } else {
+                // Field is excluded from ListModel - provide default/dummy value
+                if let Some(default_expr) = get_crudcrate_expr(field, "default") {
+                    quote! { #field_name: #default_expr }
+                } else {
+                    quote! { #field_name: Default::default() }
+                }
+            }
+        })
+        .collect();
+
+    // Generate assignments for non-db fields
+    let non_db_assignments: Vec<proc_macro2::TokenStream> = analysis.non_db_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            if let Some(default_expr) = get_crudcrate_expr(field, "default") {
+                quote! { #field_name: #default_expr }
+            } else {
+                quote! { #field_name: Default::default() }
+            }
+        })
+        .collect();
+
+    quote! {
+        async fn get_all_list(
+            db: &sea_orm::DatabaseConnection,
+            condition: &sea_orm::Condition,
+            order_column: Self::ColumnType,
+            order_direction: sea_orm::Order,
+            offset: u64,
+            limit: u64,
+        ) -> Result<Vec<Self::ListModel>, sea_orm::DbErr> {
+            use sea_orm::{QuerySelect, QueryOrder};
+            
+            #[derive(sea_orm::FromQueryResult)]
+            struct QueryData {
+                #(#query_result_fields),*
+            }
+
+            let query_results = Self::EntityType::find()
+                .select_only()
+                #(.column(#list_columns))*
+                .filter(condition.clone())
+                .order_by(order_column, order_direction)
+                .offset(offset)
+                .limit(limit)
+                .into_model::<QueryData>()
+                .all(db)
+                .await?;
+
+            Ok(query_results.into_iter().map(|query_data| {
+                let full_model = Self {
+                    #(#full_struct_assignments,)*
+                    #(#non_db_assignments,)*
+                };
+                Self::ListModel::from(full_model)
+            }).collect())
+        }
+    }
 }
 
 /// Generates the `CRUDResource` implementation based on the provided metadata and field analysis
@@ -1016,8 +1131,8 @@ pub(super) fn generate_crud_resource_impl(
     let description = crud_meta.description.as_deref().unwrap_or("");
     let enum_case_sensitive = crud_meta.enum_case_sensitive;
 
-    let (get_one_impl, get_all_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
-        generate_method_impls(crud_meta);
+    let (get_one_impl, get_all_impl, get_all_list_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
+        generate_method_impls(crud_meta, analysis);
 
     quote! {
         #[async_trait::async_trait]
@@ -1061,6 +1176,7 @@ pub(super) fn generate_crud_resource_impl(
 
             #get_one_impl
             #get_all_impl
+            #get_all_list_impl
             #create_impl
             #update_impl
             #delete_impl
