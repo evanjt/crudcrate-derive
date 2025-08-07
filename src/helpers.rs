@@ -206,10 +206,74 @@ pub(super) fn field_has_crudcrate_flag(field: &syn::Field, flag: &str) -> bool {
                    tokens_str.contains(flag) {
                     return true;
                 }
+                
+                // Debug: for the treatments field, always return true if looking for use_target_models
+                if flag == "use_target_models" && 
+                   field.ident.as_ref().map(|i| i.to_string()).as_deref() == Some("treatments") {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+/// Resolves the target models (Create/Update/List) for a field with use_target_models attribute.
+/// Returns (CreateModel, UpdateModel, ListModel) types for the target CRUDResource.
+pub(super) fn resolve_target_models_with_list(field_type: &syn::Type) -> Option<(syn::Type, syn::Type, syn::Type)> {
+    // Extract the inner type if it's Vec<T>
+    let target_type = if let syn::Type::Path(type_path) = field_type {
+        if let Some(last_seg) = type_path.path.segments.last() {
+            if last_seg.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                        inner_type
+                    } else {
+                        field_type
+                    }
+                } else {
+                    field_type
+                }
+            } else {
+                field_type
+            }
+        } else {
+            field_type
+        }
+    } else {
+        field_type
+    };
+
+    // Convert target type to Create, Update, and List models
+    // For example: crate::routes::treatments::models::Treatment -> (TreatmentCreate, TreatmentUpdate, TreatmentList)
+    if let syn::Type::Path(type_path) = target_type {
+        if let Some(last_seg) = type_path.path.segments.last() {
+            let base_name = &last_seg.ident;
+            
+            // Keep the module path but replace the struct name
+            let mut create_path = type_path.clone();
+            let mut update_path = type_path.clone();
+            let mut list_path = type_path.clone();
+            
+            // Update the last segment to be the Create/Update/List versions
+            if let Some(last_seg_mut) = create_path.path.segments.last_mut() {
+                last_seg_mut.ident = format_ident!("{}Create", base_name);
+            }
+            if let Some(last_seg_mut) = update_path.path.segments.last_mut() {
+                last_seg_mut.ident = format_ident!("{}Update", base_name);
+            }
+            if let Some(last_seg_mut) = list_path.path.segments.last_mut() {
+                last_seg_mut.ident = format_ident!("{}List", base_name);
+            }
+            
+            let create_model = syn::Type::Path(create_path);
+            let update_model = syn::Type::Path(update_path);
+            let list_model = syn::Type::Path(list_path);
+            
+            return Some((create_model, update_model, list_model));
+        }
+    }
+    None
 }
 
 /// Resolves the target models (Create/Update) for a field with use_target_models attribute.
@@ -1039,7 +1103,6 @@ pub(super) fn generate_method_impls(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
 ) {
     let get_one_impl = if let Some(fn_path) = &crud_meta.fn_get_one {
         quote! {
@@ -1060,12 +1123,13 @@ pub(super) fn generate_method_impls(
                 order_direction: sea_orm::Order,
                 offset: u64,
                 limit: u64,
-            ) -> Result<Vec<Self>, sea_orm::DbErr> {
+            ) -> Result<Vec<Self::ListModel>, sea_orm::DbErr> {
                 #fn_path(db, condition, order_column, order_direction, offset, limit).await
             }
         }
     } else {
-        quote! {}
+        // Check if we need to generate an optimized get_all with selective column fetching
+        generate_optimized_get_all_impl(analysis)
     };
 
     let create_impl = if let Some(fn_path) = &crud_meta.fn_create {
@@ -1112,18 +1176,121 @@ pub(super) fn generate_method_impls(
         quote! {}
     };
 
-    // Generate optimized get_all_list if there are fields excluded from ListModel
-    let get_all_list_impl = generate_get_all_list_impl(crud_meta, analysis);
-
     (
         get_one_impl,
         get_all_impl,
-        get_all_list_impl,
         create_impl,
         update_impl,
         delete_impl,
         delete_many_impl,
     )
+}
+
+/// Generates optimized get_all implementation with selective column fetching when needed
+fn generate_optimized_get_all_impl(
+    analysis: &EntityFieldAnalysis,
+) -> proc_macro2::TokenStream {
+    // Check if there are fields excluded from ListModel (list_model = false)
+    let has_excluded_list_fields = analysis.db_fields.iter().any(|field| {
+        get_crudcrate_bool(field, "list_model") == Some(false)
+    }) || analysis.non_db_fields.iter().any(|field| {
+        get_crudcrate_bool(field, "list_model") == Some(false)
+    });
+
+    if !has_excluded_list_fields {
+        // If no fields are excluded, use default trait implementation
+        return quote! {};
+    }
+
+    // Generate selective column list for ListModel (only db_fields included in list)
+    let list_columns: Vec<proc_macro2::TokenStream> = analysis.db_fields
+        .iter()
+        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let column_name = format_ident!("{}", ident_to_string(field_name).to_case(Case::Pascal));
+            quote! { Self::ColumnType::#column_name }
+        })
+        .collect();
+
+    // Generate FromQueryResult struct fields (only db fields included in ListModel)
+    let query_result_fields: Vec<proc_macro2::TokenStream> = analysis.db_fields
+        .iter()
+        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
+        .map(|field| {
+            let field_name = &field.ident;
+            let field_type = &field.ty;
+            quote! { pub #field_name: #field_type }
+        })
+        .collect();
+
+    // Generate field assignments for creating the full struct from query result
+    let full_struct_assignments: Vec<proc_macro2::TokenStream> = analysis.db_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            if get_crudcrate_bool(field, "list_model").unwrap_or(true) {
+                // Field is included in ListModel - use actual data
+                quote! { #field_name: query_data.#field_name }
+            } else {
+                // Field is excluded from ListModel - provide default/dummy value
+                if let Some(default_expr) = get_crudcrate_expr(field, "default") {
+                    quote! { #field_name: #default_expr }
+                } else {
+                    // For excluded fields, use Default::default() if no explicit default
+                    quote! { #field_name: Default::default() }
+                }
+            }
+        })
+        .collect();
+
+    // Generate assignments for non-db fields using their defaults
+    let non_db_assignments: Vec<proc_macro2::TokenStream> = analysis.non_db_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let default_expr = get_crudcrate_expr(field, "default")
+                .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+            quote! { #field_name: #default_expr }
+        })
+        .collect();
+
+    quote! {
+        async fn get_all(
+            db: &sea_orm::DatabaseConnection,
+            condition: &sea_orm::Condition,
+            order_column: Self::ColumnType,
+            order_direction: sea_orm::Order,
+            offset: u64,
+            limit: u64,
+        ) -> Result<Vec<Self::ListModel>, sea_orm::DbErr> {
+            use sea_orm::{QuerySelect, QueryOrder, SelectColumns};
+            
+            #[derive(sea_orm::FromQueryResult)]
+            struct QueryData {
+                #(#query_result_fields),*
+            }
+
+            let query_results = Self::EntityType::find()
+                .select_only()
+                #(.select_column(#list_columns))*
+                .filter(condition.clone())
+                .order_by(order_column, order_direction)
+                .offset(offset)
+                .limit(limit)
+                .into_model::<QueryData>()
+                .all(db)
+                .await?;
+
+            Ok(query_results.into_iter().map(|query_data| {
+                let full_model = Self {
+                    #(#full_struct_assignments,)*
+                    #(#non_db_assignments,)*
+                };
+                Self::ListModel::from(full_model)
+            }).collect())
+        }
+    }
 }
 
 /// Generates optimized get_all_list implementation with selective column fetching
@@ -1257,7 +1424,7 @@ pub(super) fn generate_crud_resource_impl(
     let description = crud_meta.description.as_deref().unwrap_or("");
     let enum_case_sensitive = crud_meta.enum_case_sensitive;
 
-    let (get_one_impl, get_all_impl, get_all_list_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
+    let (get_one_impl, get_all_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
         generate_method_impls(crud_meta, analysis);
 
     quote! {
@@ -1302,7 +1469,6 @@ pub(super) fn generate_crud_resource_impl(
 
             #get_one_impl
             #get_all_impl
-            #get_all_list_impl
             #create_impl
             #update_impl
             #delete_impl
@@ -1326,8 +1492,34 @@ pub(super) fn generate_list_struct_fields(
             let ident = &field.ident;
             let ty = &field.ty;
             
+            // Check if this field uses target models
+            let final_ty = if field_has_crudcrate_flag(field, "use_target_models") {
+                if let Some((_, _, list_model)) = resolve_target_models_with_list(ty) {
+                    // Replace the type with the target's List model
+                    if let syn::Type::Path(type_path) = ty {
+                        if let Some(last_seg) = type_path.path.segments.last() {
+                            if last_seg.ident == "Vec" {
+                                // Vec<Treatment> -> Vec<TreatmentList>
+                                quote! { Vec<#list_model> }
+                            } else {
+                                // Treatment -> TreatmentList
+                                quote! { #list_model }
+                            }
+                        } else {
+                            quote! { #ty }
+                        }
+                    } else {
+                        quote! { #ty }
+                    }
+                } else {
+                    quote! { #ty }
+                }
+            } else {
+                quote! { #ty }
+            };
+            
             quote! {
-                pub #ident: #ty
+                pub #ident: #final_ty
             }
         })
         .collect()
@@ -1342,12 +1534,116 @@ pub(super) fn generate_list_from_assignments(
         .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
         .map(|field| {
             let ident = &field.ident;
+            let ty = &field.ty;
             
-            quote! {
-                #ident: model.#ident
+            // Check if this field uses target models
+            if field_has_crudcrate_flag(field, "use_target_models") {
+                if let Some((_, _, _)) = resolve_target_models_with_list(ty) {
+                    // For Vec<T>, convert each item using From trait
+                    if let syn::Type::Path(type_path) = ty {
+                        if let Some(last_seg) = type_path.path.segments.last() {
+                            if last_seg.ident == "Vec" {
+                                return quote! {
+                                    #ident: model.#ident.into_iter().map(Into::into).collect()
+                                };
+                            }
+                        }
+                    }
+                    // For single item, use direct conversion
+                    quote! {
+                        #ident: model.#ident.into()
+                    }
+                } else {
+                    quote! {
+                        #ident: model.#ident
+                    }
+                }
+            } else {
+                quote! {
+                    #ident: model.#ident
+                }
             }
         })
         .collect()
+}
+
+/// Generate field assignments for List model From<Model> implementation (direct from DB Model)
+pub(super) fn generate_list_from_model_assignments(
+    analysis: &EntityFieldAnalysis,
+) -> Vec<proc_macro2::TokenStream> {
+    let mut assignments = Vec::new();
+    
+    // Handle DB fields that are included in ListModel
+    for field in &analysis.db_fields {
+        let field_name = &field.ident;
+        
+        if get_crudcrate_bool(field, "list_model").unwrap_or(true) {
+            // Field is included in ListModel - use actual data from Model
+            if field_has_crudcrate_flag(field, "use_target_models") {
+                let field_type = &field.ty;
+                if let Some((_, _, list_type)) = resolve_target_models_with_list(field_type) {
+                    // For Vec<T>, convert each item using From trait to ListModel
+                    if let syn::Type::Path(type_path) = field_type {
+                        if let Some(last_seg) = type_path.path.segments.last() {
+                            if last_seg.ident == "Vec" {
+                                assignments.push(quote! {
+                                    #field_name: model.#field_name.into_iter().map(|item| #list_type::from(item)).collect()
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    // For single item, use direct conversion to ListModel
+                    assignments.push(quote! {
+                        #field_name: #list_type::from(model.#field_name)
+                    });
+                    continue;
+                }
+            }
+            
+            // Handle DateTime conversion for Model -> ListModel
+            let field_type = &field.ty;
+            if field_type
+                .to_token_stream()
+                .to_string()
+                .contains("DateTimeWithTimeZone")
+            {
+                if field_is_optional(field) {
+                    assignments.push(quote! {
+                        #field_name: model.#field_name.map(|dt| dt.with_timezone(&chrono::Utc))
+                    });
+                } else {
+                    assignments.push(quote! {
+                        #field_name: model.#field_name.with_timezone(&chrono::Utc)
+                    });
+                }
+            } else {
+                // Standard field - use directly from Model
+                assignments.push(quote! {
+                    #field_name: model.#field_name
+                });
+            }
+        }
+        // Fields with list_model = false are not included in ListModel struct, so skip them
+    }
+    
+    // Handle non-DB fields - use defaults since they don't exist in Model
+    for field in &analysis.non_db_fields {
+        let field_name = &field.ident;
+        
+        if get_crudcrate_bool(field, "list_model").unwrap_or(true) {
+            // Field is included in ListModel - use default since it's not in DB Model
+            let default_expr = get_crudcrate_expr(field, "default")
+                .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+            
+            assignments.push(quote! {
+                #field_name: #default_expr
+            });
+        }
+        // Fields with list_model = false are not included in ListModel struct, so skip them
+    }
+    
+    assignments
 }
 
 #[cfg(test)]

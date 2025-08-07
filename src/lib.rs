@@ -363,6 +363,7 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
     let raw_fields = helpers::extract_named_fields(&input);
     let list_struct_fields = helpers::generate_list_struct_fields(&raw_fields);
     let list_from_assignments = helpers::generate_list_from_assignments(&raw_fields);
+    let list_from_model_assignments = helpers::generate_list_from_model_assignments(&field_analysis);
     
     let list_model = quote! {
         #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
@@ -374,6 +375,14 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
             fn from(model: #api_struct_name) -> Self {
                 Self {
                     #(#list_from_assignments),*
+                }
+            }
+        }
+
+        impl From<#struct_name> for #list_name {
+            fn from(model: #struct_name) -> Self {
+                Self {
+                    #(#list_from_model_assignments),*
                 }
             }
         }
