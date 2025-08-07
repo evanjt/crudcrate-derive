@@ -914,19 +914,14 @@ pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2:
         {
             use utoipa_axum::{router::OpenApiRouter, routes};
 
-            let resource_path = format!("/{}", #api_struct_name::RESOURCE_NAME_PLURAL);
-
-            let resource_router = OpenApiRouter::new()
+            OpenApiRouter::new()
                 .routes(routes!(get_one_handler))
                 .routes(routes!(get_all_handler))
                 .routes(routes!(create_one_handler))
                 .routes(routes!(update_one_handler))
                 .routes(routes!(delete_one_handler))
                 .routes(routes!(delete_many_handler))
-                .with_state(db.clone());
-
-            OpenApiRouter::new()
-                .nest(&resource_path, resource_router)
+                .with_state(db.clone())
         }
     }
 }
