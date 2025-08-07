@@ -929,7 +929,7 @@ pub(super) fn generate_method_impls(
         quote! {
             async fn get_all(
                 db: &sea_orm::DatabaseConnection,
-                condition: sea_orm::Condition,
+                condition: &sea_orm::Condition,
                 order_column: Self::ColumnType,
                 order_direction: sea_orm::Order,
                 offset: u64,
