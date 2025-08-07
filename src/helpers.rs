@@ -790,7 +790,7 @@ pub(super) fn generate_id_column(
 ) -> proc_macro2::TokenStream {
     if let Some(pk_field) = primary_key_field {
         let field_name = &pk_field.ident.as_ref().unwrap();
-        let column_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
+        let column_name = format_ident!("{}", ident_to_string(field_name).to_case(Case::Pascal));
         quote! { Self::ColumnType::#column_name }
     } else {
         quote! { Self::ColumnType::Id }
@@ -802,7 +802,7 @@ pub(super) fn generate_field_entries(fields: &[&syn::Field]) -> Vec<proc_macro2:
         .iter()
         .map(|field| {
             let field_name = field.ident.as_ref().unwrap();
-            let field_str = field_name.to_string();
+            let field_str = ident_to_string(field_name);
             let column_name = format_ident!("{}", field_str.to_case(Case::Pascal));
             quote! { (#field_str, Self::ColumnType::#column_name) }
         })
@@ -816,7 +816,7 @@ pub(super) fn generate_like_filterable_entries(
         .iter()
         .filter_map(|field| {
             let field_name = field.ident.as_ref().unwrap();
-            let field_str = field_name.to_string();
+            let field_str = ident_to_string(field_name);
 
             // Check if this field should use LIKE queries based on its type
             if is_text_type(&field.ty) {
@@ -835,8 +835,8 @@ pub(super) fn generate_fulltext_field_entries(
         .iter()
         .map(|field| {
             let field_name = field.ident.as_ref().unwrap();
-            let column_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
-            let field_str = field_name.to_string();
+            let field_str = ident_to_string(field_name);
+            let column_name = format_ident!("{}", field_str.to_case(Case::Pascal));
             quote! { (#field_str, Self::ColumnType::#column_name) }
         })
         .collect()
@@ -849,7 +849,7 @@ fn generate_enum_field_checker(all_fields: &[&syn::Field]) -> proc_macro2::Token
         .iter()
         .filter_map(|field| {
             if let Some(field_name) = &field.ident {
-                let field_name_str = field_name.to_string();
+                let field_name_str = ident_to_string(field_name);
                 let is_enum = field_has_crudcrate_flag(field, "enum_field");
 
                 Some(quote! {
@@ -866,6 +866,16 @@ fn generate_enum_field_checker(all_fields: &[&syn::Field]) -> proc_macro2::Token
             #(#field_checks)*
             _ => false,
         }
+    }
+}
+
+/// Helper function to handle raw identifiers properly by stripping the r# prefix
+fn ident_to_string(ident: &syn::Ident) -> String {
+    let ident_str = ident.to_string();
+    if ident_str.starts_with("r#") {
+        ident_str[2..].to_string() // Strip "r#" prefix from raw identifiers
+    } else {
+        ident_str
     }
 }
 
@@ -1023,7 +1033,7 @@ fn generate_get_all_list_impl(
         .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
         .map(|field| {
             let field_name = field.ident.as_ref().unwrap();
-            let column_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
+            let column_name = format_ident!("{}", ident_to_string(field_name).to_case(Case::Pascal));
             quote! { Self::ColumnType::#column_name }
         })
         .collect();
@@ -1396,5 +1406,23 @@ mod tests {
         };
         let result = get_string_from_attr(&attr);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_ident_to_string_normal_identifier() {
+        let ident = syn::parse_quote! { regular_field };
+        assert_eq!(ident_to_string(&ident), "regular_field");
+    }
+
+    #[test]
+    fn test_ident_to_string_raw_identifier() {
+        let ident = syn::parse_quote! { r#type };
+        assert_eq!(ident_to_string(&ident), "type");
+    }
+
+    #[test]
+    fn test_ident_to_string_raw_identifier_complex() {
+        let ident = syn::parse_quote! { r#async };
+        assert_eq!(ident_to_string(&ident), "async");
     }
 }
