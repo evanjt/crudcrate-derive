@@ -232,6 +232,7 @@ pub fn to_list_model(input: TokenStream) -> TokenStream {
 ///     on_update = chrono::Utc::now(),      // Auto-update on update
 ///     non_db_attr = true,                  // Non-database field
 ///     default = vec![],                    // Default for non-DB fields
+///     use_target_models,                   // Use target's Create/Update models for relationships
 /// )]
 /// ```
 ///
@@ -284,6 +285,7 @@ pub fn to_list_model(input: TokenStream) -> TokenStream {
 /// - `on_update = expression` - Auto-generate value on update
 /// - `non_db_attr = true` - Field is not in database (default: false)
 /// - `default = expression` - Default value for non-DB fields
+/// - `use_target_models` - Use target's Create/Update models instead of full entity model
 ///
 /// # Example
 ///

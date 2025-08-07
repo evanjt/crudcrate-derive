@@ -184,6 +184,7 @@ pub(super) fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 pub(super) fn field_has_crudcrate_flag(field: &syn::Field, flag: &str) -> bool {
     for attr in &field.attrs {
         if attr.path().is_ident("crudcrate") {
+            // First try parsing with the existing approach
             if let Meta::List(meta_list) = &attr.meta {
                 if let Ok(metas) =
                     Punctuated::<Meta, Comma>::parse_terminated.parse2(meta_list.tokens.clone())
@@ -196,10 +197,72 @@ pub(super) fn field_has_crudcrate_flag(field: &syn::Field, flag: &str) -> bool {
                         }
                     }
                 }
+                
+                // Fallback: check if the flag exists as a simple token in the token stream
+                let tokens_str = meta_list.tokens.to_string();
+                // Check both comma-separated and space-separated tokens
+                if tokens_str.split(',').any(|token| token.trim() == flag) ||
+                   tokens_str.split_whitespace().any(|token| token == flag) ||
+                   tokens_str.contains(flag) {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+/// Resolves the target models (Create/Update) for a field with use_target_models attribute.
+/// Returns (CreateModel, UpdateModel) types for the target CRUDResource.
+pub(super) fn resolve_target_models(field_type: &syn::Type) -> Option<(syn::Type, syn::Type)> {
+    // Extract the inner type if it's Vec<T>
+    let target_type = if let syn::Type::Path(type_path) = field_type {
+        if let Some(last_seg) = type_path.path.segments.last() {
+            if last_seg.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                        inner_type
+                    } else {
+                        field_type
+                    }
+                } else {
+                    field_type
+                }
+            } else {
+                field_type
+            }
+        } else {
+            field_type
+        }
+    } else {
+        field_type
+    };
+
+    // Convert target type to Create and Update models
+    // For example: crate::routes::treatments::models::Treatment -> (TreatmentCreate, TreatmentUpdate)
+    if let syn::Type::Path(type_path) = target_type {
+        if let Some(last_seg) = type_path.path.segments.last() {
+            let base_name = &last_seg.ident;
+            
+            // Keep the module path but replace the struct name
+            let mut create_path = type_path.clone();
+            let mut update_path = type_path.clone();
+            
+            // Update the last segment to be the Create/Update versions
+            if let Some(last_seg_mut) = create_path.path.segments.last_mut() {
+                last_seg_mut.ident = format_ident!("{}Create", base_name);
+            }
+            if let Some(last_seg_mut) = update_path.path.segments.last_mut() {
+                last_seg_mut.ident = format_ident!("{}Update", base_name);
+            }
+            
+            let create_model = syn::Type::Path(create_path);
+            let update_model = syn::Type::Path(update_path);
+            
+            return Some((create_model, update_model));
+        }
+    }
+    None
 }
 
 // ================================
@@ -252,14 +315,41 @@ pub(super) fn generate_create_struct_fields(
             let ty = &field.ty;
 
             if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
+                // Check if this field uses target models
+                let has_use_target_models = field_has_crudcrate_flag(field, "use_target_models");
+                let final_ty = if has_use_target_models {
+                    if let Some((create_model, _)) = resolve_target_models(ty) {
+                        // Replace the type with the target's Create model
+                        if let syn::Type::Path(type_path) = ty {
+                            if let Some(last_seg) = type_path.path.segments.last() {
+                                if last_seg.ident == "Vec" {
+                                    // Vec<Treatment> -> Vec<TreatmentCreate>
+                                    quote! { Vec<#create_model> }
+                                } else {
+                                    // Treatment -> TreatmentCreate
+                                    quote! { #create_model }
+                                }
+                            } else {
+                                quote! { #ty }
+                            }
+                        } else {
+                            quote! { #ty }
+                        }
+                    } else {
+                        quote! { #ty }
+                    }
+                } else {
+                    quote! { #ty }
+                };
+
                 if get_crudcrate_expr(field, "default").is_some() {
                     quote! {
                         #[serde(default)]
-                        pub #ident: #ty
+                        pub #ident: #final_ty
                     }
                 } else {
                     quote! {
-                        pub #ident: #ty
+                        pub #ident: #final_ty
                     }
                 }
             } else if get_crudcrate_expr(field, "on_create").is_some() {
@@ -353,14 +443,40 @@ pub(super) fn generate_update_struct_fields(
             let ty = &field.ty;
 
             if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
+                // Check if this field uses target models
+                let final_ty = if field_has_crudcrate_flag(field, "use_target_models") {
+                    if let Some((_, update_model)) = resolve_target_models(ty) {
+                        // Replace the type with the target's Update model
+                        if let syn::Type::Path(type_path) = ty {
+                            if let Some(last_seg) = type_path.path.segments.last() {
+                                if last_seg.ident == "Vec" {
+                                    // Vec<Treatment> -> Vec<TreatmentUpdate>
+                                    quote! { Vec<#update_model> }
+                                } else {
+                                    // Treatment -> TreatmentUpdate
+                                    quote! { #update_model }
+                                }
+                            } else {
+                                quote! { #ty }
+                            }
+                        } else {
+                            quote! { #ty }
+                        }
+                    } else {
+                        quote! { #ty }
+                    }
+                } else {
+                    quote! { #ty }
+                };
+
                 if get_crudcrate_expr(field, "default").is_some() {
                     quote! {
                         #[serde(default)]
-                        pub #ident: #ty
+                        pub #ident: #final_ty
                     }
                 } else {
                     quote! {
-                        pub #ident: #ty
+                        pub #ident: #final_ty
                     }
                 }
             } else {
