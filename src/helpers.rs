@@ -543,11 +543,12 @@ pub(super) fn generate_update_struct_fields(
 pub(super) fn extract_inner_type_for_update(ty: &syn::Type) -> syn::Type {
     if let syn::Type::Path(type_path) = ty
         && let Some(seg) = type_path.path.segments.last()
-            && seg.ident == "Option"
-                && let syn::PathArguments::AngleBracketed(inner_args) = &seg.arguments
-                    && let Some(syn::GenericArgument::Type(inner_ty)) = inner_args.args.first() {
-                        return inner_ty.clone();
-                    }
+        && seg.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(inner_args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = inner_args.args.first()
+    {
+        return inner_ty.clone();
+    }
     ty.clone()
 }
 
@@ -1734,6 +1735,6 @@ mod tests {
 
         // Test the filtering logic that should exclude this field
         let should_include = get_crudcrate_bool(&field, "create_model").unwrap_or(true);
-        assert_eq!(should_include, false, "Field with create_model=false should be excluded");
+        assert!(!should_include, "Field with create_model=false should be excluded");
     }
 }
