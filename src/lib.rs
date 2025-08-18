@@ -48,6 +48,8 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
     let create_struct_fields = helpers::generate_create_struct_fields(&fields);
     let conv_lines = helpers::generate_create_conversion_lines(&fields);
 
+    let model_to_create_conv = helpers::generate_model_to_create_conversion(&fields, name);
+
     let expanded = quote! {
         #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
         pub struct #create_name {
@@ -58,6 +60,14 @@ pub fn to_create_model(input: TokenStream) -> TokenStream {
             fn from(create: #create_name) -> Self {
                 #active_model_type {
                     #(#conv_lines),*
+                }
+            }
+        }
+
+        impl From<#name> for #create_name {
+            fn from(model: #name) -> Self {
+                Self {
+                    #(#model_to_create_conv),*
                 }
             }
         }
@@ -103,6 +113,7 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
     let update_struct_fields = helpers::generate_update_struct_fields(&included_fields);
     let (included_merge, excluded_merge) =
         helpers::generate_update_merge_code(&fields, &included_fields);
+    let model_to_update_conv = helpers::generate_model_to_update_conversion(&included_fields, name);
 
     let expanded = quote! {
         #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
@@ -121,6 +132,14 @@ pub fn to_update_model(input: TokenStream) -> TokenStream {
         impl crudcrate::traits::MergeIntoActiveModel<#active_model_type> for #update_name {
             fn merge_into_activemodel(self, model: #active_model_type) -> Result<#active_model_type, sea_orm::DbErr> {
                 Self::merge_fields(self, model)
+            }
+        }
+
+        impl From<#name> for #update_name {
+            fn from(model: #name) -> Self {
+                Self {
+                    #(#model_to_update_conv),*
+                }
             }
         }
     };
@@ -233,6 +252,7 @@ pub fn to_list_model(input: TokenStream) -> TokenStream {
 ///     non_db_attr = true,                  // Non-database field
 ///     default = vec![],                    // Default for non-DB fields
 ///     use_target_models,                   // Use target's Create/Update models for relationships
+///     join_on_get,                         // Automatically load related data in get_one/get_all
 /// )]
 /// ```
 ///
@@ -286,6 +306,7 @@ pub fn to_list_model(input: TokenStream) -> TokenStream {
 /// - `non_db_attr = true` - Field is not in database (default: false)
 /// - `default = expression` - Default value for non-DB fields
 /// - `use_target_models` - Use target's Create/Update models instead of full entity model
+/// - `join_on_get` - Automatically load related data in get_one/get_all operations
 ///
 /// # Example
 ///
@@ -325,7 +346,7 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
 
     let (api_struct_name, active_model_path) =
         helpers::parse_entity_attributes(&input, struct_name);
-    let crud_meta = helpers::parse_crud_resource_meta(&input.attrs).with_defaults(
+    let mut crud_meta = helpers::parse_crud_resource_meta(&input.attrs).with_defaults(
         &helpers::extract_table_name(&input.attrs).unwrap_or_else(|| struct_name.to_string()),
         &api_struct_name.to_string(),
     );
@@ -353,9 +374,10 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
         helpers::generate_from_impl(struct_name, &api_struct_name, &from_model_assignments);
     let crud_impl = helpers::generate_conditional_crud_impl(
         &api_struct_name,
-        &crud_meta,
+        &mut crud_meta,
         &active_model_path,
         &field_analysis,
+        struct_name,
     );
     
     // Generate List model struct and implementation

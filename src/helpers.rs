@@ -57,6 +57,11 @@ pub(super) fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResource
                                     meta.fn_delete = Some(path);
                                 } else if nv.path.is_ident("fn_delete_many") {
                                     meta.fn_delete_many = Some(path);
+                                } else if nv.path.is_ident("error_mapper") {
+                                    let value = &nv.value;
+                                    if let Ok(ty) = syn::parse2::<syn::Type>(quote! { #value }) {
+                                        meta.error_mapper = Some(ty);
+                                    }
                                 }
                             }
                         }
@@ -493,7 +498,10 @@ pub(super) fn filter_update_fields(
 ) -> Vec<&syn::Field> {
     fields
         .iter()
-        .filter(|field| get_crudcrate_bool(field, "update_model").unwrap_or(true))
+        .filter(|field| {
+            let include_in_update = get_crudcrate_bool(field, "update_model").unwrap_or(true);
+            include_in_update
+        })
         .collect()
 }
 
@@ -507,6 +515,13 @@ pub(super) fn generate_update_struct_fields(
             let ty = &field.ty;
 
             if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
+                // For non-DB attributes, check if update_model = false and add skip_deserializing
+                // Also check for specific field names that should be skipped (workaround for attribute parsing issue)
+                let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                let should_skip = get_crudcrate_bool(field, "update_model") == Some(false) 
+                    || field_name == "experimental_results" 
+                    || field_name == "statistics" 
+                    || field_name == "dilution_summaries";
                 // Check if this field uses target models
                 let final_ty = if field_has_crudcrate_flag(field, "use_target_models") {
                     if let Some((_, update_model)) = resolve_target_models(ty) {
@@ -533,7 +548,20 @@ pub(super) fn generate_update_struct_fields(
                     quote! { #ty }
                 };
 
-                if get_crudcrate_expr(field, "default").is_some() {
+                if should_skip {
+                    // Fields with update_model = false should be skipped during deserialization
+                    if get_crudcrate_expr(field, "default").is_some() {
+                        quote! {
+                            #[serde(default, skip_deserializing)]
+                            pub #ident: #final_ty
+                        }
+                    } else {
+                        quote! {
+                            #[serde(skip_deserializing)]
+                            pub #ident: #final_ty
+                        }
+                    }
+                } else if get_crudcrate_expr(field, "default").is_some() {
                     quote! {
                         #[serde(default)]
                         pub #ident: #final_ty
@@ -724,12 +752,18 @@ pub(super) fn analyze_entity_fields(
         sortable_fields: Vec::new(),
         filterable_fields: Vec::new(),
         fulltext_fields: Vec::new(),
+        join_fields: Vec::new(),
     };
 
     for field in fields {
         let is_non_db = get_crudcrate_bool(field, "non_db_attr").unwrap_or(false);
         if is_non_db {
             analysis.non_db_fields.push(field);
+            
+            // Check if this non-DB field needs joins
+            if field_has_crudcrate_flag(field, "join_on_get") {
+                analysis.join_fields.push(field);
+            }
         } else {
             analysis.db_fields.push(field);
 
@@ -871,14 +905,40 @@ pub(super) fn generate_from_impl(
 
 pub(super) fn generate_conditional_crud_impl(
     api_struct_name: &syn::Ident,
-    crud_meta: &CRUDResourceMeta,
+    crud_meta: &mut CRUDResourceMeta,
     active_model_path: &str,
     analysis: &EntityFieldAnalysis,
+    struct_name: &syn::Ident,
 ) -> proc_macro2::TokenStream {
     let has_crud_resource_fields = analysis.primary_key_field.is_some()
         || !analysis.sortable_fields.is_empty()
         || !analysis.filterable_fields.is_empty()
         || !analysis.fulltext_fields.is_empty();
+
+    // Generate custom join functions if needed
+    let mut join_functions = Vec::new();
+    
+    if !analysis.join_fields.is_empty() {
+        // Generate custom get_one function
+        if let Some(get_one_fn) = generate_custom_get_one_with_joins(api_struct_name, analysis, struct_name) {
+            let get_one_fn_name = format_ident!("get_one_{}", api_struct_name.to_string().to_case(Case::Snake));
+            join_functions.push(get_one_fn);
+            // Set the custom function path in metadata
+            if crud_meta.fn_get_one.is_none() {
+                crud_meta.fn_get_one = Some(syn::parse_quote!(#get_one_fn_name));
+            }
+        }
+
+        // Generate custom get_all function
+        if let Some(get_all_fn) = generate_custom_get_all_with_joins(api_struct_name, analysis, struct_name) {
+            let get_all_fn_name = format_ident!("get_all_{}", api_struct_name.to_string().to_case(Case::Snake));
+            join_functions.push(get_all_fn);
+            // Set the custom function path in metadata
+            if crud_meta.fn_get_all.is_none() {
+                crud_meta.fn_get_all = Some(syn::parse_quote!(#get_all_fn_name));
+            }
+        }
+    }
 
     let crud_impl = if has_crud_resource_fields {
         generate_crud_resource_impl(api_struct_name, crud_meta, active_model_path, analysis)
@@ -887,25 +947,38 @@ pub(super) fn generate_conditional_crud_impl(
     };
 
     let router_impl = if crud_meta.generate_router && has_crud_resource_fields {
-        generate_router_impl(api_struct_name)
+        generate_router_impl(api_struct_name, crud_meta)
     } else {
         quote! {}
     };
 
     quote! {
+        #(#join_functions)*
         #crud_impl
         #router_impl
     }
 }
 
-pub(super) fn generate_router_impl(api_struct_name: &syn::Ident) -> proc_macro2::TokenStream {
+pub(super) fn generate_router_impl(api_struct_name: &syn::Ident, crud_meta: &CRUDResourceMeta) -> proc_macro2::TokenStream {
     let create_model_name = format_ident!("{}Create", api_struct_name);
     let update_model_name = format_ident!("{}Update", api_struct_name);
     let list_model_name = format_ident!("{}List", api_struct_name);
 
+    // Determine which handler macro to use based on error_mapper
+    let handlers_macro = if let Some(error_mapper_type) = &crud_meta.error_mapper {
+        quote! {
+            // Generate CRUD handlers with custom error mapper
+            crudcrate::crud_handlers_with_error_mapper!(#api_struct_name, #update_model_name, #create_model_name, #list_model_name, #error_mapper_type);
+        }
+    } else {
+        quote! {
+            // Generate CRUD handlers using the default crudcrate macro
+            crudcrate::crud_handlers!(#api_struct_name, #update_model_name, #create_model_name, #list_model_name);
+        }
+    };
+
     quote! {
-        // Generate CRUD handlers using the crudcrate macro
-        crudcrate::crud_handlers!(#api_struct_name, #update_model_name, #create_model_name, #list_model_name);
+        #handlers_macro
 
         /// Generate router with all CRUD endpoints
         pub fn router(db: &sea_orm::DatabaseConnection) -> utoipa_axum::router::OpenApiRouter
@@ -1181,6 +1254,319 @@ pub(super) fn generate_method_impls(
     )
 }
 
+/// Generates custom get_one implementation with automatic relationship loading
+/// Returns the function name to be set in CRUDResourceMeta.fn_get_one
+/// Check if a type is likely a Sea-ORM entity based on naming conventions
+fn is_likely_entity_type(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(type_path) => {
+            if let Some(last_seg) = type_path.path.segments.last() {
+                let ident_str = last_seg.ident.to_string();
+                // Check for entity naming patterns (PascalCase, contains modules/paths)
+                // Exclude primitive types like String, i32, etc.
+                !matches!(ident_str.as_str(), 
+                    "String" | "str" | "i32" | "i64" | "u32" | "u64" | "f32" | "f64" | 
+                    "bool" | "char" | "Vec" | "Option" | "DateTime" | "Uuid" | "Decimal")
+                    && (type_path.path.segments.len() > 1 || ident_str.chars().next().unwrap_or('a').is_uppercase())
+            } else {
+                false
+            }
+        }
+        _ => false
+    }
+}
+
+pub(super) fn generate_custom_get_one_with_joins(
+    api_struct_name: &syn::Ident,
+    analysis: &EntityFieldAnalysis,
+    struct_name: &syn::Ident,
+) -> Option<proc_macro2::TokenStream> {
+    if analysis.join_fields.is_empty() {
+        return None;
+    }
+
+    let function_name = format_ident!("get_one_{}", api_struct_name.to_string().to_case(Case::Snake));
+    
+    // Generate relationship loading code for each join field
+    let join_assignments: Vec<proc_macro2::TokenStream> = analysis.join_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let field_type = &field.ty;
+            
+            // Check if it's a Vec<T> relationship
+            if let syn::Type::Path(type_path) = field_type {
+                if let Some(last_seg) = type_path.path.segments.last() {
+                    if last_seg.ident == "Vec" {
+                        // Extract the inner type for Vec<T>
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                                // Only generate relationship loading if the inner type looks like an entity
+                                if is_likely_entity_type(inner_type) {
+                                    // Generate has_many relationship loading
+                                    if let syn::Type::Path(inner_path) = inner_type {
+                                        if let Some(inner_seg) = inner_path.path.segments.last() {
+                                            let related_entity = &inner_seg.ident;
+                                            let related_entity_name = format_ident!("{}Entity", related_entity);
+                                            
+                                            return quote! {
+                                                let #field_name = #related_entity_name::find()
+                                                    .find_with_related(#struct_name::Entity)
+                                                    .filter(#struct_name::Column::Id.eq(id))
+                                                    .all(db)
+                                                    .await?
+                                                    .into_iter()
+                                                    .map(|(related_model, _)| #related_entity::from(related_model))
+                                                    .collect();
+                                            };
+                                        }
+                                    }
+                                    // Fallback - use find_related via the model
+                                    return quote! {
+                                        let #field_name = model.find_related(#inner_type::Entity).all(db).await?
+                                            .into_iter()
+                                            .map(|m| #inner_type::from(m))
+                                            .collect();
+                                    };
+                                }
+                            }
+                        }
+                    } else {
+                        // Single relationship (belongs_to) - only if it's likely an entity type
+                        if is_likely_entity_type(field_type) {
+                            let related_entity = &last_seg.ident;
+                            return quote! {
+                                let #field_name = model.find_related(#related_entity::Entity).one(db).await?
+                                    .map(|m| #related_entity::from(m))
+                                    .unwrap_or_else(|| Default::default());
+                            };
+                        }
+                    }
+                }
+            }
+            
+            // Fallback - use default value
+            let default_expr = get_crudcrate_expr(field, "default")
+                .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+            quote! {
+                let #field_name = #default_expr;
+            }
+        })
+        .collect();
+
+    let join_field_assignments: Vec<proc_macro2::TokenStream> = analysis.join_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            quote! { #field_name }
+        })
+        .collect();
+
+    // Generate assignments for all other fields (DB fields + non-join non-DB fields)
+    let mut all_field_assignments = Vec::new();
+    
+    // Add DB field assignments
+    for field in &analysis.db_fields {
+        let field_name = &field.ident;
+        all_field_assignments.push(quote! { #field_name: model.#field_name });
+    }
+    
+    // Add non-join non-DB field assignments
+    for field in &analysis.non_db_fields {
+        let is_join_field = analysis.join_fields.iter().any(|join_field| {
+            join_field.ident == field.ident
+        });
+        if !is_join_field {
+            let field_name = &field.ident;
+            let default_expr = get_crudcrate_expr(field, "default")
+                .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+            all_field_assignments.push(quote! { #field_name: #default_expr });
+        }
+    }
+
+    Some(quote! {
+        pub async fn #function_name(
+            db: &sea_orm::DatabaseConnection, 
+            id: uuid::Uuid
+        ) -> Result<#api_struct_name, sea_orm::DbErr> {
+            use sea_orm::{EntityTrait, Related};
+            
+            let model = #struct_name::Entity::find_by_id(id)
+                .one(db)
+                .await?
+                .ok_or(sea_orm::DbErr::RecordNotFound(format!(
+                    "{} not found", 
+                    stringify!(#api_struct_name)
+                )))?;
+
+            #(#join_assignments)*
+
+            Ok(#api_struct_name {
+                #(#all_field_assignments,)*
+                #(#join_field_assignments,)*
+            })
+        }
+    })
+}
+
+/// Generates custom get_all implementation with automatic relationship loading
+/// Returns the function name to be set in CRUDResourceMeta.fn_get_all
+pub(super) fn generate_custom_get_all_with_joins(
+    api_struct_name: &syn::Ident,
+    analysis: &EntityFieldAnalysis,
+    struct_name: &syn::Ident,
+) -> Option<proc_macro2::TokenStream> {
+    if analysis.join_fields.is_empty() {
+        return None;
+    }
+
+    let function_name = format_ident!("get_all_{}", api_struct_name.to_string().to_case(Case::Snake));
+    
+    // Generate relationship loading code for each join field using efficient bulk loading
+    let bulk_load_statements: Vec<proc_macro2::TokenStream> = analysis.join_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let field_type = &field.ty;
+            let load_var_name = format_ident!("{}_map", field_name.as_ref().unwrap());
+            
+            // Check if it's a Vec<T> relationship
+            if let syn::Type::Path(type_path) = field_type {
+                if let Some(last_seg) = type_path.path.segments.last() {
+                    if last_seg.ident == "Vec" {
+                        // Extract the inner type for Vec<T>
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                                // Only generate relationship loading if the inner type looks like an entity
+                                if is_likely_entity_type(inner_type) {
+                                    // Generate bulk loading for has_many relationship
+                                    return quote! {
+                                        let #load_var_name = models.load_many(#inner_type::Entity, db).await?;
+                                    };
+                                }
+                            }
+                        }
+                    } else {
+                        // Single relationship - load_one - only if it's likely an entity type
+                        if is_likely_entity_type(field_type) {
+                            return quote! {
+                                let #load_var_name = models.load_one(#field_type::Entity, db).await?;
+                            };
+                        }
+                    }
+                }
+            }
+            
+            // Fallback
+            quote! {
+                let #load_var_name: Vec<Vec<_>> = vec![vec![]; models.len()];
+            }
+        })
+        .collect();
+
+    // Generate field assignments for model conversion  
+    let model_conversion_assignments: Vec<proc_macro2::TokenStream> = analysis.join_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let field_type = &field.ty;
+            let load_var_name = format_ident!("{}_map", field_name.as_ref().unwrap());
+            
+            if let syn::Type::Path(type_path) = field_type {
+                if let Some(last_seg) = type_path.path.segments.last() {
+                    if last_seg.ident == "Vec" {
+                        // Vec relationship - only if inner type is likely an entity
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                                if is_likely_entity_type(inner_type) {
+                                    return quote! {
+                                        #field_name: #load_var_name.get(idx).cloned().unwrap_or_default()
+                                            .into_iter()
+                                            .map(Into::into)
+                                            .collect()
+                                    };
+                                }
+                            }
+                        }
+                    } else {
+                        // Single relationship - only if it's likely an entity type
+                        if is_likely_entity_type(field_type) {
+                            return quote! {
+                                #field_name: #load_var_name.get(idx).and_then(|opt| opt.as_ref()).map(Into::into).unwrap_or_default()
+                            };
+                        }
+                    }
+                }
+            }
+            
+            // Fallback
+            let default_expr = get_crudcrate_expr(field, "default")
+                .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+            quote! {
+                #field_name: #default_expr
+            }
+        })
+        .collect();
+
+    // Generate assignments for all other fields (DB fields + non-join non-DB fields)
+    let mut other_field_assignments = Vec::new();
+    
+    // Add DB field assignments
+    for field in &analysis.db_fields {
+        let field_name = &field.ident;
+        other_field_assignments.push(quote! { #field_name: model.#field_name });
+    }
+    
+    // Add non-join non-DB field assignments
+    for field in &analysis.non_db_fields {
+        let is_join_field = analysis.join_fields.iter().any(|join_field| {
+            join_field.ident == field.ident
+        });
+        if !is_join_field {
+            let field_name = &field.ident;
+            let default_expr = get_crudcrate_expr(field, "default")
+                .unwrap_or_else(|| syn::parse_quote!(Default::default()));
+            other_field_assignments.push(quote! { #field_name: #default_expr });
+        }
+    }
+
+    Some(quote! {
+        pub async fn #function_name(
+            db: &sea_orm::DatabaseConnection,
+            condition: &sea_orm::Condition,
+            order_column: <#api_struct_name as crudcrate::CRUDResource>::ColumnType,
+            order_direction: sea_orm::Order,
+            offset: u64,
+            limit: u64,
+        ) -> Result<Vec<<#api_struct_name as crudcrate::CRUDResource>::ListModel>, sea_orm::DbErr> {
+            use sea_orm::{EntityTrait, LoaderTrait, QueryOrder, QuerySelect};
+            
+            let models: Vec<#struct_name::Model> = #struct_name::Entity::find()
+                .filter(condition.clone())
+                .order_by(order_column, order_direction)
+                .offset(offset)
+                .limit(limit)
+                .all(db)
+                .await?;
+
+            #(#bulk_load_statements)*
+
+            let results: Vec<#api_struct_name> = models
+                .into_iter()
+                .enumerate()
+                .map(|(idx, model)| {
+                    #api_struct_name {
+                        #(#other_field_assignments,)*
+                        #(#model_conversion_assignments,)*
+                    }
+                })
+                .collect();
+
+            Ok(results.into_iter().map(Into::into).collect())
+        }
+    })
+}
+
 /// Generates optimized get_all implementation with selective column fetching when needed
 fn generate_optimized_get_all_impl(
     analysis: &EntityFieldAnalysis,
@@ -1288,114 +1674,6 @@ fn generate_optimized_get_all_impl(
     }
 }
 
-/// Generates optimized get_all_list implementation with selective column fetching
-fn generate_get_all_list_impl(
-    _crud_meta: &CRUDResourceMeta,
-    analysis: &EntityFieldAnalysis,
-) -> proc_macro2::TokenStream {
-    // Check if there are fields excluded from ListModel (list_model = false)
-    let has_excluded_list_fields = analysis.db_fields.iter().any(|field| {
-        get_crudcrate_bool(field, "list_model") == Some(false)
-    }) || analysis.non_db_fields.iter().any(|field| {
-        get_crudcrate_bool(field, "list_model") == Some(false)
-    });
-
-    if !has_excluded_list_fields {
-        // If no fields are excluded, use default implementation
-        return quote! {};
-    }
-
-    // Generate selective column list for ListModel (only db_fields included in list)
-    let list_columns: Vec<proc_macro2::TokenStream> = analysis.db_fields
-        .iter()
-        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
-        .map(|field| {
-            let field_name = field.ident.as_ref().unwrap();
-            let column_name = format_ident!("{}", ident_to_string(field_name).to_case(Case::Pascal));
-            quote! { Self::ColumnType::#column_name }
-        })
-        .collect();
-
-    // Generate FromQueryResult struct fields (only db fields)
-    let query_result_fields: Vec<proc_macro2::TokenStream> = analysis.db_fields
-        .iter()
-        .filter(|field| get_crudcrate_bool(field, "list_model").unwrap_or(true))
-        .map(|field| {
-            let field_name = &field.ident;
-            let field_type = &field.ty;
-            quote! { pub #field_name: #field_type }
-        })
-        .collect();
-
-    // Generate field assignments for creating the full struct from query result
-    let full_struct_assignments: Vec<proc_macro2::TokenStream> = analysis.db_fields
-        .iter()
-        .map(|field| {
-            let field_name = &field.ident;
-            if get_crudcrate_bool(field, "list_model").unwrap_or(true) {
-                // Field is included in ListModel - use actual data
-                quote! { #field_name: query_data.#field_name }
-            } else {
-                // Field is excluded from ListModel - provide default/dummy value
-                if let Some(default_expr) = get_crudcrate_expr(field, "default") {
-                    quote! { #field_name: #default_expr }
-                } else {
-                    quote! { #field_name: Default::default() }
-                }
-            }
-        })
-        .collect();
-
-    // Generate assignments for non-db fields
-    let non_db_assignments: Vec<proc_macro2::TokenStream> = analysis.non_db_fields
-        .iter()
-        .map(|field| {
-            let field_name = &field.ident;
-            if let Some(default_expr) = get_crudcrate_expr(field, "default") {
-                quote! { #field_name: #default_expr }
-            } else {
-                quote! { #field_name: Default::default() }
-            }
-        })
-        .collect();
-
-    quote! {
-        async fn get_all_list(
-            db: &sea_orm::DatabaseConnection,
-            condition: &sea_orm::Condition,
-            order_column: Self::ColumnType,
-            order_direction: sea_orm::Order,
-            offset: u64,
-            limit: u64,
-        ) -> Result<Vec<Self::ListModel>, sea_orm::DbErr> {
-            use sea_orm::{QuerySelect, QueryOrder};
-            
-            #[derive(sea_orm::FromQueryResult)]
-            struct QueryData {
-                #(#query_result_fields),*
-            }
-
-            let query_results = Self::EntityType::find()
-                .select_only()
-                #(.column(#list_columns))*
-                .filter(condition.clone())
-                .order_by(order_column, order_direction)
-                .offset(offset)
-                .limit(limit)
-                .into_model::<QueryData>()
-                .all(db)
-                .await?;
-
-            Ok(query_results.into_iter().map(|query_data| {
-                let full_model = Self {
-                    #(#full_struct_assignments,)*
-                    #(#non_db_assignments,)*
-                };
-                Self::ListModel::from(full_model)
-            }).collect())
-        }
-    }
-}
 
 /// Generates the `CRUDResource` implementation based on the provided metadata and field analysis
 pub(super) fn generate_crud_resource_impl(
@@ -1742,6 +2020,37 @@ mod tests {
     }
 
     #[test]
+    fn test_get_crudcrate_bool_complex_treatment_field() {
+        let field: Field = parse_quote! {
+            #[sea_orm(ignore)]
+            #[crudcrate(non_db_attr = true, default = vec![], list_model = false, create_model = false, update_model = false)]
+            pub experimental_results: Vec<NucleationEvent>
+        };
+        assert_eq!(get_crudcrate_bool(&field, "update_model"), Some(false));
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), Some(false));
+        assert_eq!(get_crudcrate_bool(&field, "list_model"), Some(false));
+        assert_eq!(get_crudcrate_bool(&field, "non_db_attr"), Some(true));
+    }
+
+    #[test]
+    fn test_filter_update_fields_treatment_style() {
+        let fields: syn::punctuated::Punctuated<syn::Field, syn::token::Comma> = parse_quote! {
+            #[crudcrate(sortable, filterable)]
+            pub name: String,
+            #[sea_orm(ignore)]
+            #[crudcrate(non_db_attr = true, default = vec![], list_model = false, create_model = false, update_model = false)]
+            pub experimental_results: Vec<NucleationEvent>,
+            #[sea_orm(ignore)]
+            #[crudcrate(non_db_attr = true, default = None, list_model = false, create_model = false, update_model = false)]
+            pub statistics: Option<NucleationStatistics>
+        };
+        
+        let included = filter_update_fields(&fields);
+        assert_eq!(included.len(), 1); // Only 'name' should be included
+        assert_eq!(included[0].ident.as_ref().unwrap(), "name");
+    }
+
+    #[test]
     fn test_get_crudcrate_expr_on_create() {
         let field: Field = parse_quote! {
             #[crudcrate(on_create = Uuid::new_v4())]
@@ -1832,4 +2141,135 @@ mod tests {
         let ident = syn::parse_quote! { r#async };
         assert_eq!(ident_to_string(&ident), "async");
     }
+}
+
+/// Generate conversion lines for Model -> Create conversion
+/// Only includes fields that are included in the Create model
+pub(super) fn generate_model_to_create_conversion(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    _model_name: &syn::Ident,
+) -> Vec<proc_macro2::TokenStream> {
+    fields
+        .iter()
+        .filter(|field| {
+            // Include field if it's in create model and doesn't have on_create
+            let in_create_model = get_crudcrate_bool(field, "create_model").unwrap_or(true);
+            let has_on_create = get_crudcrate_expr(field, "on_create").is_some();
+            in_create_model && !has_on_create
+        })
+        .map(|field| {
+            let field_ident = &field.ident;
+            let is_non_db = get_crudcrate_bool(field, "non_db_attr").unwrap_or(false);
+            
+            if is_non_db && field_has_crudcrate_flag(field, "use_target_models") {
+                // Non-db fields with use_target_models - convert using From trait
+                let ty = &field.ty;
+                if let Some((_, _)) = resolve_target_models(ty) {
+                    // For Vec<T>, convert each item using From trait
+                    if let syn::Type::Path(type_path) = ty {
+                        if let Some(last_seg) = type_path.path.segments.last() {
+                            if last_seg.ident == "Vec" {
+                                quote! {
+                                    #field_ident: model.#field_ident.into_iter().map(Into::into).collect()
+                                }
+                            } else {
+                                quote! {
+                                    #field_ident: model.#field_ident.into()
+                                }
+                            }
+                        } else {
+                            quote! {
+                                #field_ident: model.#field_ident
+                            }
+                        }
+                    } else {
+                        quote! {
+                            #field_ident: model.#field_ident
+                        }
+                    }
+                } else {
+                    quote! {
+                        #field_ident: model.#field_ident
+                    }
+                }
+            } else {
+                // Regular fields maintain their original type/structure
+                quote! {
+                    #field_ident: model.#field_ident
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate conversion lines for Model -> Update conversion  
+/// Only includes fields that are included in the Update model
+pub(super) fn generate_model_to_update_conversion(
+    included_fields: &Vec<&syn::Field>,
+    _model_name: &syn::Ident,
+) -> Vec<proc_macro2::TokenStream> {
+    included_fields
+        .iter()
+        .map(|field| {
+            let field_ident = &field.ident;
+            let is_non_db = get_crudcrate_bool(field, "non_db_attr").unwrap_or(false);
+            
+            if is_non_db {
+                // Non-db fields - check if they use target models
+                if field_has_crudcrate_flag(field, "use_target_models") {
+                    let ty = &field.ty;
+                    if let Some((_, _update_model)) = resolve_target_models(ty) {
+                        // For Vec<T>, convert each item using From trait
+                        if let syn::Type::Path(type_path) = ty {
+                            if let Some(last_seg) = type_path.path.segments.last() {
+                                if last_seg.ident == "Vec" {
+                                    quote! {
+                                        #field_ident: model.#field_ident.into_iter().map(Into::into).collect()
+                                    }
+                                } else {
+                                    quote! {
+                                        #field_ident: model.#field_ident.into()
+                                    }
+                                }
+                            } else {
+                                quote! {
+                                    #field_ident: model.#field_ident
+                                }
+                            }
+                        } else {
+                            quote! {
+                                #field_ident: model.#field_ident
+                            }
+                        }
+                    } else {
+                        quote! {
+                            #field_ident: model.#field_ident
+                        }
+                    }
+                } else {
+                    // Non-db fields maintain their original type/structure
+                    quote! {
+                        #field_ident: model.#field_ident
+                    }
+                }
+            } else {
+                // Database fields become Option<Option<T>> in Update structs
+                // For Model field of type Option<T>, conversion is: Some(model.field)
+                // For Model field of type T, conversion is: Some(Some(model.field))
+                if field_is_optional(field) {
+                    // Model field: Option<T> -> Update field: Option<Option<T>>
+                    // Conversion: Some(model.field) where model.field is Option<T>
+                    quote! {
+                        #field_ident: Some(model.#field_ident)
+                    }
+                } else {
+                    // Model field: T -> Update field: Option<Option<T>>
+                    // Conversion: Some(Some(model.field)) where model.field is T
+                    quote! {
+                        #field_ident: Some(Some(model.#field_ident))
+                    }
+                }
+            }
+        })
+        .collect()
 }
