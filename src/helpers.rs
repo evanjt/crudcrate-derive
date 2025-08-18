@@ -184,7 +184,6 @@ pub(super) fn get_string_from_attr(attr: &syn::Attribute) -> Option<String> {
 pub(super) fn field_has_crudcrate_flag(field: &syn::Field, flag: &str) -> bool {
     for attr in &field.attrs {
         if attr.path().is_ident("crudcrate") {
-            // First try parsing with the existing approach
             if let Meta::List(meta_list) = &attr.meta {
                 if let Ok(metas) =
                     Punctuated::<Meta, Comma>::parse_terminated.parse2(meta_list.tokens.clone())
@@ -196,21 +195,6 @@ pub(super) fn field_has_crudcrate_flag(field: &syn::Field, flag: &str) -> bool {
                             }
                         }
                     }
-                }
-                
-                // Fallback: check if the flag exists as a simple token in the token stream
-                let tokens_str = meta_list.tokens.to_string();
-                // Check both comma-separated and space-separated tokens
-                if tokens_str.split(',').any(|token| token.trim() == flag) ||
-                   tokens_str.split_whitespace().any(|token| token == flag) ||
-                   tokens_str.contains(flag) {
-                    return true;
-                }
-                
-                // Debug: for the treatments field, always return true if looking for use_target_models
-                if flag == "use_target_models" && 
-                   field.ident.as_ref().map(|i| i.to_string()).as_deref() == Some("treatments") {
-                    return true;
                 }
             }
         }
@@ -381,6 +365,7 @@ pub(super) fn generate_create_struct_fields(
             if get_crudcrate_bool(field, "non_db_attr").unwrap_or(false) {
                 // Check if this field uses target models
                 let has_use_target_models = field_has_crudcrate_flag(field, "use_target_models");
+                
                 let final_ty = if has_use_target_models {
                     if let Some((create_model, _)) = resolve_target_models(ty) {
                         // Replace the type with the target's Create model
@@ -821,8 +806,17 @@ pub(super) fn generate_api_struct_content(
         let default_expr = get_crudcrate_expr(field, "default")
             .unwrap_or_else(|| syn::parse_quote!(Default::default()));
 
+        // Check if this field has use_target_models flag
+        let has_use_target_models = field_has_crudcrate_flag(field, "use_target_models");
+        
+        let crudcrate_attr = if has_use_target_models {
+            quote! { #[crudcrate(non_db_attr = true, default = #default_expr, use_target_models)] }
+        } else {
+            quote! { #[crudcrate(non_db_attr = true, default = #default_expr)] }
+        };
+
         api_struct_fields.push(quote! {
-            #[crudcrate(non_db_attr = true, default = #default_expr)]
+            #crudcrate_attr
             pub #field_name: #field_type
         });
 
