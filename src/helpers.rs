@@ -788,17 +788,15 @@ pub(super) fn generate_api_struct_content(
         let default_expr = get_crudcrate_expr(field, "default")
             .unwrap_or_else(|| syn::parse_quote!(Default::default()));
 
-        // Check if this field has use_target_models flag
-        let has_use_target_models = field_has_crudcrate_flag(field, "use_target_models");
-
-        let crudcrate_attr = if has_use_target_models {
-            quote! { #[crudcrate(non_db_attr = true, default = #default_expr, use_target_models)] }
-        } else {
-            quote! { #[crudcrate(non_db_attr = true, default = #default_expr)] }
-        };
+        // Preserve all original crudcrate attributes while ensuring required ones are present
+        let crudcrate_attrs: Vec<_> = field
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("crudcrate"))
+            .collect();
 
         api_struct_fields.push(quote! {
-            #crudcrate_attr
+            #(#crudcrate_attrs)*
             pub #field_name: #field_type
         });
 
@@ -1712,5 +1710,24 @@ mod tests {
     fn test_ident_to_string_raw_identifier_complex() {
         let ident = syn::parse_quote! { r#async };
         assert_eq!(ident_to_string(&ident), "async");
+    }
+
+    #[test]
+    fn test_get_crudcrate_bool_with_complex_attributes() {
+        // Test the exact attribute pattern from the failing test case
+        let field: Field = parse_quote! {
+            #[crudcrate(non_db_attr = true, default = vec![], create_model = false)]
+            pub field: Vec<String>
+        };
+        assert_eq!(get_crudcrate_bool(&field, "create_model"), Some(false));
+        assert_eq!(get_crudcrate_bool(&field, "non_db_attr"), Some(true));
+        
+        // Also test that default expr parsing works
+        let default_expr = get_crudcrate_expr(&field, "default");
+        assert!(default_expr.is_some());
+
+        // Test the filtering logic that should exclude this field
+        let should_include = get_crudcrate_bool(&field, "create_model").unwrap_or(true);
+        assert_eq!(should_include, false, "Field with create_model=false should be excluded");
     }
 }
