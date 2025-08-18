@@ -455,6 +455,12 @@ pub(super) fn generate_create_conversion_lines(
                     #ident: ActiveValue::Set((#expr).into())
                 });
             }
+        } else {
+            // Field is excluded from Create model and has no on_create - set to NotSet
+            // This allows the field to be set manually later in custom create functions
+            conv_lines.push(quote! {
+                #ident: ActiveValue::NotSet
+            });
         }
     }
     conv_lines
