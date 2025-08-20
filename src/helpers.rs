@@ -873,6 +873,9 @@ pub(super) fn generate_conditional_crud_impl(
         quote! {}
     };
 
+    // Auto-registration now happens automatically for all models, 
+    // so we don't need the manual registration method anymore
+
     quote! {
         #crud_impl
         #router_impl
@@ -1305,14 +1308,37 @@ pub(super) fn generate_crud_resource_impl(
     let enum_field_checker = generate_enum_field_checker(&analysis.db_fields);
 
     let name_singular = crud_meta.name_singular.as_deref().unwrap_or("resource");
-    let name_plural = crud_meta.name_plural.as_deref().unwrap_or("resources");
+    let _name_plural = crud_meta.name_plural.as_deref().unwrap_or("resources");
     let description = crud_meta.description.as_deref().unwrap_or("");
     let enum_case_sensitive = crud_meta.enum_case_sensitive;
 
     let (get_one_impl, get_all_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
         generate_method_impls(crud_meta, analysis);
 
+    // Generate registration lazy static and auto-registration call for all models
+    let (registration_static, auto_register_call) = (
+        quote! {
+            // Lazy static that ensures registration happens on first trait usage
+            static __REGISTER_LAZY: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
+                crudcrate::register_analyser::<#api_struct_name>();
+            });
+        },
+        quote! { 
+            std::sync::LazyLock::force(&__REGISTER_LAZY);
+        }
+    );
+    
+    // Generate resource name plural constant
+    let resource_name_plural_impl = {
+        let name_plural = crud_meta.name_plural.clone().unwrap_or_default();
+        quote! {
+            const RESOURCE_NAME_PLURAL: &'static str = #name_plural;
+        }
+    };
+
     quote! {
+        #registration_static
+        
         #[async_trait::async_trait]
         impl crudcrate::CRUDResource for #api_struct_name {
             type EntityType = #entity_type;
@@ -1324,14 +1350,16 @@ pub(super) fn generate_crud_resource_impl(
 
             const ID_COLUMN: Self::ColumnType = #id_column;
             const RESOURCE_NAME_SINGULAR: &'static str = #name_singular;
-            const RESOURCE_NAME_PLURAL: &'static str = #name_plural;
+            #resource_name_plural_impl
             const RESOURCE_DESCRIPTION: &'static str = #description;
 
             fn sortable_columns() -> Vec<(&'static str, Self::ColumnType)> {
+                #auto_register_call
                 vec![#(#sortable_entries),*]
             }
 
             fn filterable_columns() -> Vec<(&'static str, Self::ColumnType)> {
+                #auto_register_call
                 vec![#(#filterable_entries),*]
             }
 
@@ -1349,6 +1377,7 @@ pub(super) fn generate_crud_resource_impl(
             }
 
             fn fulltext_searchable_columns() -> Vec<(&'static str, Self::ColumnType)> {
+                #auto_register_call
                 vec![#(#fulltext_entries),*]
             }
 
@@ -1526,6 +1555,7 @@ pub(super) fn generate_list_from_model_assignments(
 
     assignments
 }
+
 
 #[cfg(test)]
 mod tests {
