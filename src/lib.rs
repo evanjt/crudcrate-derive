@@ -325,8 +325,9 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
 
     let (api_struct_name, active_model_path) =
         helpers::parse_entity_attributes(&input, struct_name);
+    let table_name = helpers::extract_table_name(&input.attrs).unwrap_or_else(|| struct_name.to_string());
     let crud_meta = helpers::parse_crud_resource_meta(&input.attrs).with_defaults(
-        &helpers::extract_table_name(&input.attrs).unwrap_or_else(|| struct_name.to_string()),
+        &table_name,
         &api_struct_name.to_string(),
     );
 
@@ -356,6 +357,7 @@ pub fn entity_to_models(input: TokenStream) -> TokenStream {
         &crud_meta,
         &active_model_path,
         &field_analysis,
+        &table_name,
     );
     
     // Generate List model struct and implementation

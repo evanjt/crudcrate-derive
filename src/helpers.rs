@@ -31,6 +31,8 @@ pub(super) fn parse_crud_resource_meta(attrs: &[syn::Attribute]) -> CRUDResource
                                     meta.entity_type = Some(value);
                                 } else if nv.path.is_ident("column_type") {
                                     meta.column_type = Some(value);
+                                } else if nv.path.is_ident("fulltext_language") {
+                                    meta.fulltext_language = Some(value);
                                 }
                             }
                             Lit::Bool(b) => {
@@ -855,6 +857,7 @@ pub(super) fn generate_conditional_crud_impl(
     crud_meta: &CRUDResourceMeta,
     active_model_path: &str,
     analysis: &EntityFieldAnalysis,
+    table_name: &str,
 ) -> proc_macro2::TokenStream {
     let has_crud_resource_fields = analysis.primary_key_field.is_some()
         || !analysis.sortable_fields.is_empty()
@@ -862,7 +865,7 @@ pub(super) fn generate_conditional_crud_impl(
         || !analysis.fulltext_fields.is_empty();
 
     let crud_impl = if has_crud_resource_fields {
-        generate_crud_resource_impl(api_struct_name, crud_meta, active_model_path, analysis)
+        generate_crud_resource_impl(api_struct_name, crud_meta, active_model_path, analysis, table_name)
     } else {
         quote! {}
     };
@@ -1290,6 +1293,7 @@ pub(super) fn generate_crud_resource_impl(
     crud_meta: &CRUDResourceMeta,
     active_model_path: &str,
     analysis: &EntityFieldAnalysis,
+    table_name: &str,
 ) -> proc_macro2::TokenStream {
     let (
         create_model_name,
@@ -1311,6 +1315,7 @@ pub(super) fn generate_crud_resource_impl(
     let _name_plural = crud_meta.name_plural.as_deref().unwrap_or("resources");
     let description = crud_meta.description.as_deref().unwrap_or("");
     let enum_case_sensitive = crud_meta.enum_case_sensitive;
+    let fulltext_language = crud_meta.fulltext_language.as_deref().unwrap_or("english");
 
     let (get_one_impl, get_all_impl, create_impl, update_impl, delete_impl, delete_many_impl) =
         generate_method_impls(crud_meta, analysis);
@@ -1351,7 +1356,9 @@ pub(super) fn generate_crud_resource_impl(
             const ID_COLUMN: Self::ColumnType = #id_column;
             const RESOURCE_NAME_SINGULAR: &'static str = #name_singular;
             #resource_name_plural_impl
+            const TABLE_NAME: &'static str = #table_name;
             const RESOURCE_DESCRIPTION: &'static str = #description;
+            const FULLTEXT_LANGUAGE: &'static str = #fulltext_language;
 
             fn sortable_columns() -> Vec<(&'static str, Self::ColumnType)> {
                 #auto_register_call

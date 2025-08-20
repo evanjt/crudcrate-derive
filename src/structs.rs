@@ -16,6 +16,7 @@ pub(super) struct CRUDResourceMeta {
     pub(super) fn_delete_many: Option<syn::Path>,
     pub(super) generate_router: bool,
     pub(super) enum_case_sensitive: bool,
+    pub(super) fulltext_language: Option<String>,
 }
 
 impl CRUDResourceMeta {
