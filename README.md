@@ -1,3 +1,9 @@
+### ⚠️ Repository Archived
+
+**This repository has been merged into the main crudcrate repository at https://github.com/evanjt/crudcrate starting from version 0.5.0 and will be archived.**
+
+Please use the main repository for all future development and issues.
+
 ### Note
 These are the procedural macros for the `crudcrate` crate. They are not meant to be used directly
 and can be accessed through the `crudcrate` crate.
